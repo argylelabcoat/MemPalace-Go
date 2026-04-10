@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/argylelabcoat/mempalace-go/benchmarks/convomem"
-	"github.com/argylelabcoat/mempalace-go/benchmarks/longmemeval"
 	"github.com/argylelabcoat/mempalace-go/benchmarks/locomo"
+	"github.com/argylelabcoat/mempalace-go/benchmarks/longmemeval"
 	"github.com/argylelabcoat/mempalace-go/benchmarks/membench"
 	"github.com/spf13/cobra"
 )

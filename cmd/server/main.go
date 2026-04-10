@@ -107,7 +107,7 @@ func NewCommand() *cobra.Command {
 }
 
 func registerTools(server *mcp.Server, stack *layers.MemoryStack, searcher *search.Searcher, kgDB *kg.KnowledgeGraph, walInstance *wal.WAL, palacePath string, palaceGraph *palace.Graph, agentDiary *diary.Diary) {
-	server.RegisterTool("search", "Search memories", mcp.SearchToolSchema, func(params map[string]any) (any, error) {
+	server.RegisterTool("mempalace_search", "Search memories", mcp.SearchToolSchema, func(params map[string]any) (any, error) {
 		query, _ := params["query"].(string)
 		wing, _ := params["wing"].(string)
 		room, _ := params["room"].(string)
@@ -127,7 +127,7 @@ func registerTools(server *mcp.Server, stack *layers.MemoryStack, searcher *sear
 		}, nil
 	})
 
-	server.RegisterTool("wake", "Wake up memory with wing context", mcp.SchemaToJSON(map[string]any{
+	server.RegisterTool("mempalace_wake", "Wake up memory with wing context", mcp.SchemaToJSON(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"wing": map[string]any{"type": "string"},
@@ -144,7 +144,7 @@ func registerTools(server *mcp.Server, stack *layers.MemoryStack, searcher *sear
 		}, nil
 	})
 
-	server.RegisterTool("recall", "Recall memories from wing/room", mcp.SchemaToJSON(map[string]any{
+	server.RegisterTool("mempalace_recall", "Recall memories from wing/room", mcp.SchemaToJSON(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"wing":  map[string]any{"type": "string"},
@@ -168,7 +168,7 @@ func registerTools(server *mcp.Server, stack *layers.MemoryStack, searcher *sear
 		}, nil
 	})
 
-	server.RegisterTool("kg_query", "Query knowledge graph", mcp.SchemaToJSON(map[string]any{
+	server.RegisterTool("mempalace_kg_query", "Query knowledge graph", mcp.SchemaToJSON(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"entity":    map[string]any{"type": "string"},

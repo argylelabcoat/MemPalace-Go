@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/argylelabcoat/mempalace-go/benchmarks"
 	"github.com/argylelabcoat/mempalace-go/internal/dialect"
@@ -76,8 +78,8 @@ func Run(dataFile string, topK int, mode string, granularity string, limit int, 
 			continue
 		}
 		store, _, err := buildCorpus(ctx, emb, sessions, mode, encoder, granularity)
-		emb.Close()
 		if err != nil {
+			emb.Close()
 			continue
 		}
 		searcher := search.NewSearcher(store, emb)
@@ -106,6 +108,7 @@ func Run(dataFile string, topK int, mode string, granularity string, limit int, 
 				totalF1 += f1
 			}
 		}
+		emb.Close()
 	}
 	totalQA := 0
 	for _, recalls := range catRecalls {
@@ -157,7 +160,7 @@ func extractSessions(conv map[string]any) map[string][]map[string]string {
 }
 
 func buildCorpus(ctx context.Context, emb *embedder.Embedder, sessions map[string][]map[string]string, mode string, encoder *dialect.Encoder, granularity string) (*govector.Store, []string, error) {
-	store, err := govector.NewStore("", 384)
+	store, err := govector.NewStore(filepath.Join(os.TempDir(), fmt.Sprintf("bench_%d", time.Now().UnixNano())), 384)
 	if err != nil {
 		return nil, nil, err
 	}

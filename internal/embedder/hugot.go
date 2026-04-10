@@ -22,7 +22,11 @@ func New(modelName string, modelsDir string) (*Embedder, error) {
 		modelName = "sentence-transformers/all-MiniLM-L6-v2"
 	}
 
-	modelPath, err := hugot.DownloadModel(modelName, modelsDir, hugot.NewDownloadOptions())
+	downloadOpts := hugot.NewDownloadOptions()
+	downloadOpts.OnnxFilePath = "onnx/model.onnx"
+	downloadOpts.Verbose = false
+
+	modelPath, err := hugot.DownloadModel(modelName, modelsDir, downloadOpts)
 	if err != nil {
 		return nil, fmt.Errorf("download model: %w", err)
 	}

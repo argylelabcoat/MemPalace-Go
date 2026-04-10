@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/argylelabcoat/mempalace-go/benchmarks"
 	"github.com/argylelabcoat/mempalace-go/internal/dialect"
@@ -19,7 +21,7 @@ type Entry struct {
 	QuestionID         string   `json:"question_id"`
 	QuestionType       string   `json:"question_type"`
 	Question           string   `json:"question"`
-	Answer             string   `json:"answer"`
+	Answer             any      `json:"answer"`
 	AnswerSessionIDs   []string `json:"answer_session_ids"`
 	QuestionDate       string   `json:"question_date"`
 	HaystackSessions   [][]any  `json:"haystack_sessions"`
@@ -64,7 +66,7 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return nil, err
 	}
-	if skip > 0 && skip < len(entries) {
+	if skip > 0 && skip <= len(entries) {
 		entries = entries[skip:]
 	}
 	if limit > 0 && len(entries) > limit {
@@ -87,20 +89,27 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 	totalNDCG10 := 0.0
 	perTypeResults := make(map[string]*TypeResult)
 
+	// Create one embedder for the entire benchmark run — loading the ONNX model
+	// once is much cheaper than reloading it for every question entry.
+	emb, err := embedder.New("", "")
+	if err != nil {
+		return nil, fmt.Errorf("create embedder: %w", err)
+	}
+	defer emb.Close()
+
 	for _, entry := range entries {
-		emb, err := embedder.New("", "")
+		store, corpusIDs, err := buildCorpus(ctx, emb, entry, mode, encoder)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error building corpus: %v\n", err)
 			continue
 		}
-
-		store, corpusIDs, err := buildCorpus(ctx, emb, entry, mode, encoder)
-		emb.Close()
-		if err != nil {
-			continue
+		if len(corpusIDs) == 0 {
+			fmt.Fprintf(os.Stderr, "Warning: entry %s has 0 corpus IDs\n", entry.QuestionID)
 		}
 
 		searcher := search.NewSearcher(store, emb)
 		results, err := searcher.Search(ctx, entry.Question, "", "", topK)
+		store.Close() // release file handles and temp storage after each entry
 		if err != nil {
 			continue
 		}
@@ -108,17 +117,6 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 		var retrievedIDs []string
 		for _, r := range results {
 			retrievedIDs = append(retrievedIDs, r.Metadata["corpus_id"])
-		}
-
-		// Fill missing
-		retrievedSet := make(map[string]bool)
-		for _, id := range retrievedIDs {
-			retrievedSet[id] = true
-		}
-		for _, id := range corpusIDs {
-			if !retrievedSet[id] {
-				retrievedIDs = append(retrievedIDs, id)
-			}
 		}
 
 		retrievedSessionIDs := mapCorpusToSessionIDs(retrievedIDs, entry)
@@ -133,7 +131,10 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 
 		r5 := benchmarks.RecallAny(top5, entry.AnswerSessionIDs)
 		r10 := benchmarks.RecallAny(top10, entry.AnswerSessionIDs)
-		ndcg10 := benchmarks.NDCG(retrievedIDs, entry.AnswerSessionIDs, corpusIDs, 10)
+		// Use session IDs (not raw corpus IDs) for NDCG so relevance comparisons
+		// against entry.AnswerSessionIDs (which are session IDs) work correctly.
+		allHaystackSessionIDs := mapCorpusToSessionIDs(corpusIDs, entry)
+		ndcg10 := benchmarks.NDCG(retrievedSessionIDs, entry.AnswerSessionIDs, allHaystackSessionIDs, 10)
 
 		if r5 > 0 {
 			hits5++
@@ -151,7 +152,7 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 			}
 			rAny := benchmarks.RecallAny(topKIDs, entry.AnswerSessionIDs)
 			rAll := benchmarks.RecallAll(topKIDs, entry.AnswerSessionIDs)
-			ndcg := benchmarks.NDCG(retrievedIDs, entry.AnswerSessionIDs, corpusIDs, k)
+			ndcg := benchmarks.NDCG(retrievedSessionIDs, entry.AnswerSessionIDs, allHaystackSessionIDs, k)
 			kr := result.PerK[k]
 			kr.RecallAny += rAny
 			kr.RecallAll += rAll
@@ -202,7 +203,7 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 }
 
 func buildCorpus(ctx context.Context, emb *embedder.Embedder, entry Entry, mode string, encoder *dialect.Encoder) (*govector.Store, []string, error) {
-	store, err := govector.NewStore("", 384)
+	store, err := govector.NewStore(filepath.Join(os.TempDir(), fmt.Sprintf("bench_%d", time.Now().UnixNano())), 384)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -259,15 +260,40 @@ func mapCorpusToSessionIDs(corpusIDs []string, entry Entry) []string {
 	var sessionIDs []string
 	seen := make(map[string]bool)
 	for _, cid := range corpusIDs {
+		// Fast path: corpus ID is sessionID + "_turn_0" (the format buildCorpus uses).
 		sessionID := strings.TrimSuffix(cid, "_turn_0")
-		if sessionID == cid {
+		if sessionID != cid {
+			// Suffix was stripped — verify the resulting session ID actually exists.
+			found := false
 			for _, s := range entry.HaystackSessionIDs {
-				if strings.HasPrefix(cid, s) {
-					sessionID = s
+				if s == sessionID {
+					found = true
 					break
 				}
 			}
+			if !found {
+				// Stripped form isn't a known session; fall through to full scan.
+				sessionID = cid
+			}
 		}
+
+		if sessionID == cid {
+			// Fallback: find the longest session ID that is a prefix of this corpus ID.
+			// Using the longest match avoids ambiguity (e.g. "sess1" vs "sess10").
+			best := ""
+			for _, s := range entry.HaystackSessionIDs {
+				if strings.HasPrefix(cid, s) && len(s) > len(best) {
+					best = s
+				}
+			}
+			if best == "" {
+				// No session matches this corpus ID — skip it rather than leaking
+				// the raw corpus ID into the session list.
+				continue
+			}
+			sessionID = best
+		}
+
 		if !seen[sessionID] {
 			seen[sessionID] = true
 			sessionIDs = append(sessionIDs, sessionID)

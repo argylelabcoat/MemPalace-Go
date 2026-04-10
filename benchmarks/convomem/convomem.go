@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/argylelabcoat/mempalace-go/internal/dialect"
 	"github.com/argylelabcoat/mempalace-go/internal/embedder"
@@ -153,7 +154,7 @@ func runItem(ctx context.Context, item EvidenceItem, topK int, mode string, enco
 	}
 	defer emb.Close()
 
-	store, err := govector.NewStore("", 384)
+	store, err := govector.NewStore(filepath.Join(os.TempDir(), fmt.Sprintf("bench_%d", time.Now().UnixNano())), 384)
 	if err != nil {
 		return 0, err
 	}
@@ -181,6 +182,7 @@ func runItem(ctx context.Context, item EvidenceItem, topK int, mode string, enco
 	}
 
 	results, err := searcher.Search(ctx, item.Question, "", "", topK)
+	emb.Close()
 	if err != nil {
 		return 0, err
 	}

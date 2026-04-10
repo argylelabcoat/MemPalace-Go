@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/argylelabcoat/mempalace-go/internal/embedder"
 	"github.com/argylelabcoat/mempalace-go/internal/search"
@@ -151,11 +152,12 @@ func runCategory(ctx context.Context, filePath, topic string, topK int, mode str
 			}
 		}
 	}
+	emb.Close()
 	return hits, total, nil
 }
 
 func buildCorpus(ctx context.Context, emb *embedder.Embedder, topicName string, items []MemBenchItem) (*govector.Store, error) {
-	store, err := govector.NewStore("", 384)
+	store, err := govector.NewStore(filepath.Join(os.TempDir(), fmt.Sprintf("bench_%d", time.Now().UnixNano())), 384)
 	if err != nil {
 		return nil, err
 	}

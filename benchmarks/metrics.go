@@ -59,13 +59,15 @@ func FractionalRecall(topK []string, evidenceIDs []string) float64 {
 }
 
 // NDCG computes Normalized Discounted Cumulative Gain with binary relevance.
+// corpusIDs is the full set of candidate IDs used to determine how many
+// relevant documents exist in total (for correct IDCG normalisation).
 func NDCG(topK []string, correctIDs []string, corpusIDs []string, k int) float64 {
 	correctSet := make(map[string]bool)
 	for _, id := range correctIDs {
 		correctSet[id] = true
 	}
 
-	// Compute relevances for top-K
+	// Compute DCG: relevance at each rank position in the retrieved list.
 	relevances := make([]float64, 0, min(k, len(topK)))
 	for i := 0; i < min(k, len(topK)); i++ {
 		if correctSet[topK[i]] {
@@ -74,20 +76,24 @@ func NDCG(topK []string, correctIDs []string, corpusIDs []string, k int) float64
 			relevances = append(relevances, 0.0)
 		}
 	}
-
-	// DCG
 	dcgVal := computeDCG(relevances, k)
 
-	// Ideal DCG
-	ideal := make([]float64, len(relevances))
-	copy(ideal, relevances)
-	// Sort descending
-	for i := 0; i < len(ideal); i++ {
-		for j := i + 1; j < len(ideal); j++ {
-			if ideal[j] > ideal[i] {
-				ideal[i], ideal[j] = ideal[j], ideal[i]
-			}
+	// Ideal DCG: place all relevant docs (capped at k) at the top ranks.
+	// Count how many relevant items exist in the corpus (not just in retrieved).
+	relevantInCorpus := 0
+	for _, id := range corpusIDs {
+		if correctSet[id] {
+			relevantInCorpus++
 		}
+	}
+	// Also count any correct IDs that may not appear in corpusIDs (defensive).
+	if relevantInCorpus == 0 {
+		relevantInCorpus = len(correctIDs)
+	}
+	numIdeal := min(relevantInCorpus, k)
+	ideal := make([]float64, numIdeal)
+	for i := range ideal {
+		ideal[i] = 1.0
 	}
 	idcgVal := computeDCG(ideal, k)
 

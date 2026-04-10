@@ -250,9 +250,19 @@ func DetectFormat(content []byte) string {
 		}
 	}
 
-	// Check for ChatGPT
+	// Check for ChatGPT — either the full conversations.json mapping format
+	// (contains "author" + "role") or the per-message wrapper format (top-level
+	// "message" key whose value is a JSON object).
 	if strings.Contains(text, `"author"`) && strings.Contains(text, `"role"`) {
 		return "chatgpt"
+	}
+	var rawObj map[string]any
+	if err := json.Unmarshal(content, &rawObj); err == nil {
+		if msgVal, ok := rawObj["message"]; ok {
+			if _, ok := msgVal.(map[string]any); ok {
+				return "chatgpt"
+			}
+		}
 	}
 
 	// Check for Claude

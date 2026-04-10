@@ -83,13 +83,18 @@ func (s *Searcher) Search(ctx context.Context, query string, wing, room string, 
 			ID:       r.ID,
 			Metadata: map[string]string{},
 		}
+		// Copy all string payload fields into Metadata so callers can access
+		// any metadata stored alongside the vector (e.g. corpus_id, session_id).
+		for k, v := range r.Payload {
+			if strVal, ok := v.(string); ok {
+				d.Metadata[k] = strVal
+			}
+		}
 		if wingVal, ok := r.Payload["wing"].(string); ok {
 			d.Wing = wingVal
-			d.Metadata["wing"] = wingVal
 		}
 		if roomVal, ok := r.Payload["room"].(string); ok {
 			d.Room = roomVal
-			d.Metadata["room"] = roomVal
 		}
 		if contentVal, ok := r.Payload["content"].(string); ok {
 			d.Content = contentVal

@@ -63,17 +63,39 @@ func NewSearcher(store Store, embedder Embedder) *Searcher {
 }
 
 func (s *Searcher) Search(ctx context.Context, query string, wing, room string, nResults int) ([]Drawer, error) {
-	vector, err := s.embedder.CreateEmbedding(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-
 	filter := map[string]any{}
 	if wing != "" {
 		filter["wing"] = wing
 	}
 	if room != "" {
 		filter["room"] = room
+	}
+	return s.SearchWithFilter(ctx, query, filter, nResults)
+}
+
+// SearchOptions provides advanced filtering with $in/$nin operators.
+type SearchOptions struct {
+	// Wings filters by wing — single value for exact match, slice for $in.
+	Wings []string
+	// Rooms filters by room — single value for exact match, slice for $in.
+	Rooms []string
+	// ExcludeWings applies $nin on the wing field.
+	ExcludeWings []string
+	// ExcludeRooms applies $nin on the room field.
+	ExcludeRooms []string
+}
+
+// SearchWithOptions performs search with advanced filter options.
+func (s *Searcher) SearchWithOptions(ctx context.Context, query string, opts SearchOptions, nResults int) ([]Drawer, error) {
+	filter := buildFilterFromOptions(opts)
+	return s.SearchWithFilter(ctx, query, filter, nResults)
+}
+
+// SearchWithFilter performs search with a raw filter map supporting $in/$nin.
+func (s *Searcher) SearchWithFilter(ctx context.Context, query string, filter map[string]any, nResults int) ([]Drawer, error) {
+	vector, err := s.embedder.CreateEmbedding(ctx, query)
+	if err != nil {
+		return nil, err
 	}
 
 	results, err := s.store.Search(vector, nResults, filter)
@@ -106,6 +128,66 @@ func (s *Searcher) Search(ctx context.Context, query string, wing, room string, 
 		drawers = append(drawers, d)
 	}
 	return drawers, nil
+}
+
+// buildFilterFromOptions converts SearchOptions into a filter map.
+func buildFilterFromOptions(opts SearchOptions) map[string]any {
+	filter := map[string]any{}
+
+	if len(opts.Wings) == 1 {
+		filter["wing"] = opts.Wings[0]
+	} else if len(opts.Wings) > 1 {
+		vals := make([]any, len(opts.Wings))
+		for i, v := range opts.Wings {
+			vals[i] = v
+		}
+		filter["wing"] = map[string]any{"$in": vals}
+	}
+
+	if len(opts.Rooms) == 1 {
+		filter["room"] = opts.Rooms[0]
+	} else if len(opts.Rooms) > 1 {
+		vals := make([]any, len(opts.Rooms))
+		for i, v := range opts.Rooms {
+			vals[i] = v
+		}
+		filter["room"] = map[string]any{"$in": vals}
+	}
+
+	if len(opts.ExcludeWings) > 0 {
+		vals := make([]any, len(opts.ExcludeWings))
+		for i, v := range opts.ExcludeWings {
+			vals[i] = v
+		}
+		filter["wing"] = mergeWithNin(filter["wing"], vals)
+	}
+
+	if len(opts.ExcludeRooms) > 0 {
+		vals := make([]any, len(opts.ExcludeRooms))
+		for i, v := range opts.ExcludeRooms {
+			vals[i] = v
+		}
+		filter["room"] = mergeWithNin(filter["room"], vals)
+	}
+
+	return filter
+}
+
+// mergeWithNin adds $nin to an existing filter value (exact or $in).
+func mergeWithNin(existing any, ninVals []any) map[string]any {
+	result := map[string]any{}
+
+	switch v := existing.(type) {
+	case string:
+		result["$in"] = []any{v}
+	case map[string]any:
+		if inVals, ok := v["$in"]; ok {
+			result["$in"] = inVals
+		}
+	}
+
+	result["$nin"] = ninVals
+	return result
 }
 
 func (s *Searcher) Store(ctx context.Context, drawer palace.Drawer) error {

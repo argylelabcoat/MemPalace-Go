@@ -251,7 +251,44 @@ When running as an MCP server, mempalace-go exposes the following tools:
 |------|-------------|------------|
 | `mempalace_deep_search` | L3 deep semantic search with full results | `query`, `wing` (optional), `room` (optional), `count` (default: 20) |
 
-## Project Structure
+## LongMemEval Benchmark Results
+
+The `bench longmemeval` command runs the [LongMemEval](https://arxiv.org/abs/2410.10813) session-retrieval benchmark (500 questions, ~49 sessions each). Results below are for the `session` granularity, `raw` mode, top-50 retrieval, on Apple M-series (pure-Go GoMLX backend, no CoreML).
+
+### Accuracy (500 questions)
+
+| Metric      | Score  |
+|-------------|--------|
+| Recall@5    | 92.8%  |
+| Recall@10   | 96.2%  |
+| NDCG@10     | 0.809  |
+
+| Type                       | n   | R@5   | R@10   | NDCG@10 |
+|----------------------------|-----|-------|--------|---------|
+| knowledge-update           |  78 | 98.7% | 100.0% | 0.835   |
+| multi-session              | 133 | 94.7% |  98.5% | 0.823   |
+| single-session-assistant   |  56 | 96.4% |  98.2% | 0.950   |
+| single-session-preference  |  30 | 90.0% |  96.7% | 0.797   |
+| temporal-reasoning         | 133 | 90.2% |  94.7% | 0.755   |
+| single-session-user        |  70 | 85.7% |  88.6% | 0.753   |
+
+### Embedding Speed
+
+| Phase                     | Before (baseline) | After (cache + 4 workers) |
+|---------------------------|-------------------|---------------------------|
+| Per-question embed (avg)  | ~8.3 s            | ~100 ms (cache hit)       |
+| Cache build (18,362 sessions) | N/A          | ~11 min (one-time, 4 workers) |
+| Total 500-question run    | ~69 min (est.)    | ~12 min                   |
+
+**Key optimisations applied:**
+
+1. **Cross-question session cache** — unique session texts across all 500 questions are embedded once upfront. The 18,362 unique sessions are split across 4 parallel workers (each with its own hugot/GoMLX instance). After the cache is warm, each `buildCorpus` call is a pure in-memory map lookup (~100 ms for vector store writes vs 8.3 s of GEMM before).
+
+2. **Rune-based truncation** — texts are truncated to 400 Unicode code-points before embedding. Word-count limits fail on long URLs and Unicode math symbols (a single "word" can produce hundreds of subword tokens, crashing GoMLX's shape-specific JIT graphs). At 400 runes, the worst case (all ASCII URLs) produces ≤ 400 tokens, safely under the 512-position limit.
+
+3. **Chunk size 32 → 64** — hugot's `RunPipeline` is called with batches of 64 texts instead of 32, halving the number of forward-pass invocations per question.
+
+
 
 ```
 mempalace-go/

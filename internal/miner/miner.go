@@ -168,6 +168,7 @@ func (m *Miner) MineProject(ctx context.Context, dir, wingOverride string) error
 
 		// Chunk large files (800 chars, 100 overlap)
 		chunks := chunkContent(string(content), 800, 100)
+		fileMined := false
 		for i, chunk := range chunks {
 			drawer := palace.Drawer{
 				ID:         fmt.Sprintf("d_%d_%d", time.Now().UnixNano(), i),
@@ -187,9 +188,12 @@ func (m *Miner) MineProject(ctx context.Context, dir, wingOverride string) error
 				fmt.Printf("Warning: failed to store %s chunk %d: %v\n", path, i, err)
 			} else {
 				mined++
-				updateMtime(absPath, info.ModTime())
-				RegisterContentHash(absPath, contentHash)
+				fileMined = true
 			}
+		}
+		if fileMined {
+			updateMtime(absPath, info.ModTime())
+			RegisterContentHash(absPath, contentHash)
 		}
 
 		return nil

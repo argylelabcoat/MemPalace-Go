@@ -42,10 +42,17 @@ var SkipDirs = map[string]bool{
 	".idea": true, ".vscode": true,
 }
 
+// RoomDetector determines which room a file should belong to.
+type RoomDetector interface {
+	DetectRoom(filePath string, content string, projectPath string) string
+}
+
 // Miner extracts project files into the memory palace.
 type Miner struct {
-	searcher  *search.Searcher
-	ignoreFns []func(path string) bool
+	searcher     *search.Searcher
+	ignoreFns    []func(path string) bool
+	roomDetector RoomDetector
+	projectDir   string
 }
 
 // NewMiner creates a new Miner.
@@ -59,6 +66,11 @@ func NewMiner(searcher *search.Searcher) *Miner {
 // AddIgnoreFn adds a custom ignore function.
 func (m *Miner) AddIgnoreFn(fn func(path string) bool) {
 	m.ignoreFns = append(m.ignoreFns, fn)
+}
+
+// SetRoomDetector sets a custom room detector.
+func (m *Miner) SetRoomDetector(detector RoomDetector) {
+	m.roomDetector = detector
 }
 
 // LoadGitignore loads .gitignore patterns from the given directory and adds an ignore function.
@@ -84,6 +96,7 @@ func (m *Miner) MineProject(ctx context.Context, dir, wingOverride string) error
 	if wingOverride == "" {
 		wingOverride = filepath.Base(dir)
 	}
+	m.projectDir = dir
 
 	var mined, skipped, upToDate int
 
@@ -130,12 +143,7 @@ func (m *Miner) MineProject(ctx context.Context, dir, wingOverride string) error
 			}
 		}
 
-		// Check mtime-based dedup
 		absPath, _ := filepath.Abs(path)
-		if m.isUpToDate(absPath, info.ModTime()) {
-			upToDate++
-			return nil
-		}
 
 		// Read file
 		content, err := os.ReadFile(path)
@@ -143,8 +151,20 @@ func (m *Miner) MineProject(ctx context.Context, dir, wingOverride string) error
 			return nil
 		}
 
+		// Content-hash + mtime dedup
+		contentHash := GenerateContentHash(string(content))
+		if m.isUpToDate(absPath, info.ModTime()) && IsContentAlreadyMined(absPath, contentHash) {
+			upToDate++
+			return nil
+		}
+
 		// Determine room from path
-		room := detectRoomFromPath(path)
+		var room string
+		if m.roomDetector != nil {
+			room = m.roomDetector.DetectRoom(absPath, string(content), m.projectDir)
+		} else {
+			room = detectRoomFromPath(path)
+		}
 
 		// Chunk large files (800 chars, 100 overlap)
 		chunks := chunkContent(string(content), 800, 100)
@@ -168,6 +188,7 @@ func (m *Miner) MineProject(ctx context.Context, dir, wingOverride string) error
 			} else {
 				mined++
 				updateMtime(absPath, info.ModTime())
+				RegisterContentHash(absPath, contentHash)
 			}
 		}
 
@@ -223,6 +244,41 @@ func SaveMtimeIndex(palacePath string) error {
 	return nil
 }
 
+func LoadContentHashIndex(palacePath string) error {
+	path := filepath.Join(palacePath, "content_hash_index.txt")
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		parts := strings.SplitN(scanner.Text(), "\t", 2)
+		if len(parts) == 2 {
+			contentHashIndex[parts[0]] = parts[1]
+		}
+	}
+	return scanner.Err()
+}
+
+func SaveContentHashIndex(palacePath string) error {
+	path := filepath.Join(palacePath, "content_hash_index.txt")
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for file, hash := range contentHashIndex {
+		fmt.Fprintf(f, "%s\t%s\n", file, hash)
+	}
+	return nil
+}
+
 // isUpToDate checks if a file has been modified since last mining.
 func (m *Miner) isUpToDate(absPath string, modTime time.Time) bool {
 	stored, ok := mtimeIndex[absPath]
@@ -239,6 +295,24 @@ func (m *Miner) isUpToDate(absPath string, modTime time.Time) bool {
 // updateMtime updates the mtime index for a file.
 func updateMtime(absPath string, modTime time.Time) {
 	mtimeIndex[absPath] = modTime.Format(time.RFC3339)
+}
+
+var contentHashIndex = make(map[string]string)
+
+func ResetContentHashIndex() {
+	contentHashIndex = make(map[string]string)
+}
+
+func RegisterContentHash(absPath string, hash string) {
+	contentHashIndex[absPath] = hash
+}
+
+func IsContentAlreadyMined(absPath string, currentHash string) bool {
+	stored, ok := contentHashIndex[absPath]
+	if !ok {
+		return false
+	}
+	return stored == currentHash
 }
 
 // chunkContent splits content into overlapping chunks.
@@ -258,10 +332,7 @@ func chunkContent(content string, chunkSize, overlap int) []string {
 	start := 0
 
 	for start < len(content) {
-		end := start + chunkSize
-		if end > len(content) {
-			end = len(content)
-		}
+		end := min(start+chunkSize, len(content))
 
 		// Try to break at paragraph boundary (double newline)
 		if end < len(content) {
@@ -288,10 +359,7 @@ func chunkContent(content string, chunkSize, overlap int) []string {
 		}
 
 		// Move start position, accounting for overlap
-		start = end - overlap
-		if start < 0 {
-			start = 0
-		}
+		start = max(end-overlap, 0)
 	}
 
 	return chunks
@@ -300,9 +368,9 @@ func chunkContent(content string, chunkSize, overlap int) []string {
 // detectRoomFromPath determines the room from the file path.
 func detectRoomFromPath(path string) string {
 	dir := filepath.Dir(path)
-	parts := strings.Split(dir, string(filepath.Separator))
+	parts := strings.SplitSeq(dir, string(filepath.Separator))
 
-	for _, part := range parts {
+	for part := range parts {
 		lower := strings.ToLower(part)
 		switch {
 		case containsAny(lower, "frontend", "ui", "components", "views", "widgets"):
@@ -324,6 +392,29 @@ func detectRoomFromPath(path string) string {
 		case containsAny(lower, "infra", "infrastructure", "deploy", "k8s", "docker"):
 			return "infrastructure"
 		}
+	}
+
+	// Fallback: check filename itself
+	base := strings.ToLower(filepath.Base(path))
+	switch {
+	case containsAny(base, "frontend", "ui", "component", "view", "widget"):
+		return "frontend"
+	case containsAny(base, "backend", "api", "server", "handler", "controller"):
+		return "backend"
+	case containsAny(base, "doc", "readme", "wiki"):
+		return "documentation"
+	case containsAny(base, "test", "spec"):
+		return "testing"
+	case containsAny(base, "config", "cfg", "settings"):
+		return "configuration"
+	case containsAny(base, "script", "tool"):
+		return "scripts"
+	case containsAny(base, "style", "css", "design", "asset"):
+		return "design"
+	case containsAny(base, "db", "migration", "schema"):
+		return "database"
+	case containsAny(base, "deploy", "docker", "k8s", "infra"):
+		return "infrastructure"
 	}
 
 	return "general"
@@ -459,40 +550,41 @@ func matchGlob(path, pattern string) bool {
 	pattern = strings.ReplaceAll(pattern, "**/", "**/")
 	pattern = strings.ReplaceAll(pattern, "**", "**")
 
-	patternRegex := "^"
+	var patternRegex strings.Builder
+	patternRegex.WriteString("^")
 	for i := 0; i < len(pattern); i++ {
 		c := pattern[i]
 		switch c {
 		case '*':
 			if i+1 < len(pattern) && pattern[i+1] == '*' {
-				patternRegex += ".*"
+				patternRegex.WriteString(".*")
 				i++
 				if i+1 < len(pattern) && pattern[i+1] == '/' {
 					i++
 				}
 			} else {
-				patternRegex += "[^/]*"
+				patternRegex.WriteString("[^/]*")
 			}
 		case '?':
-			patternRegex += "[^/]"
+			patternRegex.WriteString("[^/]")
 		case '.':
-			patternRegex += "\\."
+			patternRegex.WriteString("\\.")
 		case '[':
-			patternRegex += "["
+			patternRegex.WriteString("[")
 		case ']':
-			patternRegex += "]"
+			patternRegex.WriteString("]")
 		case '\\':
 			if i+1 < len(pattern) {
 				i++
-				patternRegex += "\\" + string(pattern[i])
+				patternRegex.WriteString("\\" + string(pattern[i]))
 			}
 		default:
-			patternRegex += string(c)
+			patternRegex.WriteString(string(c))
 		}
 	}
-	patternRegex += "$"
+	patternRegex.WriteString("$")
 
-	matched, _ := filepath.Match(strings.ReplaceAll(patternRegex, ".*", "*"), path)
+	matched, _ := filepath.Match(strings.ReplaceAll(patternRegex.String(), ".*", "*"), path)
 	// Simple fallback: use basic string matching
 	if !matched {
 		matched = strings.Contains(path, strings.ReplaceAll(pattern, "**", ""))
@@ -507,4 +599,46 @@ func GenerateContentHash(content string) string {
 
 func generateID() string {
 	return fmt.Sprintf("d_%d", time.Now().UnixNano())
+}
+
+var roomKeywords = map[string][]string{
+	"frontend":       {"component", "react", "vue", "angular", "jsx", "tsx", "css", "html", "widget", "ui", "button", "render", "styled"},
+	"backend":        {"api", "server", "handler", "controller", "endpoint", "route", "middleware", "grpc", "rest", "http"},
+	"documentation":  {"readme", "docs", "wiki", "guide", "tutorial", "documentation", "changelog", "md"},
+	"testing":        {"test", "spec", "assert", "mock", "stub", "suite", "benchmark", "coverage"},
+	"configuration":  {"config", "setting", "env", "yaml", "toml", "json", "ini"},
+	"scripts":        {"script", "bin", "tool", "cli", "makefile", "pipeline", "workflow"},
+	"design":         {"design", "asset", "style", "theme", "layout", "mockup", "figma"},
+	"database":       {"database", "schema", "migration", "sql", "query", "table", "index", "db"},
+	"infrastructure": {"docker", "k8s", "deploy", "infra", "terraform", "ansible", "ci/cd", "container"},
+}
+
+func DetectRoomFromContent(content string) string {
+	contentLen := min(len(content), 2000)
+	contentLower := strings.ToLower(content[:contentLen])
+
+	scores := make(map[string]int)
+	for room, keywords := range roomKeywords {
+		score := 0
+		for _, keyword := range keywords {
+			score += strings.Count(contentLower, keyword)
+		}
+		if score > 0 {
+			scores[room] = score
+		}
+	}
+
+	if len(scores) == 0 {
+		return "general"
+	}
+
+	bestRoom := "general"
+	bestScore := 0
+	for room, score := range scores {
+		if score > bestScore {
+			bestScore = score
+			bestRoom = room
+		}
+	}
+	return bestRoom
 }

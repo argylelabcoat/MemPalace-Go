@@ -113,3 +113,125 @@ func TestChunkContent(t *testing.T) {
 		t.Errorf("chunkContent whitespace only = %v, want []", chunks)
 	}
 }
+
+func TestDetectRoomFromContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected string
+	}{
+		{
+			name:     "API endpoints",
+			content:  "package api\n\n// Handler handles API requests\nfunc Handler() {\n\t// server endpoint",
+			expected: "backend",
+		},
+		{
+			name:     "React component",
+			content:  "import React from 'react';\n\nexport const Button = () => {\n  return <div className='component'>",
+			expected: "frontend",
+		},
+		{
+			name:     "Test file",
+			content:  "package main\n\nimport \"testing\"\n\nfunc TestSomething(t *testing.T) {\n\t// test case",
+			expected: "testing",
+		},
+		{
+			name:     "Documentation",
+			content:  "# README\n\nThis project documentation describes how to use the wiki and docs.",
+			expected: "documentation",
+		},
+		{
+			name:     "Docker/deploy",
+			content:  "FROM golang:1.21\n# Docker deployment\n# k8s infrastructure",
+			expected: "infrastructure",
+		},
+		{
+			name:     "Short/no match",
+			content:  "x",
+			expected: "general",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DetectRoomFromContent(tt.content)
+			if result != tt.expected {
+				t.Errorf("DetectRoomFromContent() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestContentHashIndex(t *testing.T) {
+	content := "hello world test content"
+	hash1 := GenerateContentHash(content)
+	hash2 := GenerateContentHash("different content")
+	hash3 := GenerateContentHash(content)
+
+	if hash1 == hash2 {
+		t.Error("different content should produce different hashes")
+	}
+	if hash1 != hash3 {
+		t.Error("same content should produce same hash")
+	}
+	if len(hash1) != 64 {
+		t.Errorf("SHA256 hex hash should be 64 chars, got %d", len(hash1))
+	}
+}
+
+func TestIsContentAlreadyMined(t *testing.T) {
+	ResetContentHashIndex()
+
+	path := "/test/file.go"
+	hash := GenerateContentHash("test content")
+
+	RegisterContentHash(path, hash)
+
+	if !IsContentAlreadyMined(path, hash) {
+		t.Error("expected content to be already mined")
+	}
+
+	differentHash := GenerateContentHash("different content")
+	if IsContentAlreadyMined(path, differentHash) {
+		t.Error("expected different content to not be already mined")
+	}
+
+	if IsContentAlreadyMined("/test/other.go", hash) {
+		t.Error("expected unknown file to not be already mined")
+	}
+}
+
+func TestDetectRoomFromPath_Filename(t *testing.T) {
+	result := detectRoomFromPath("/project/src/ButtonComponent.tsx")
+	if result != "frontend" {
+		t.Errorf("expected 'frontend' from filename pattern, got %q", result)
+	}
+}
+
+func TestDetectRoomFromPath_APIServer(t *testing.T) {
+	result := detectRoomFromPath("/project/api/handler.go")
+	if result != "backend" {
+		t.Errorf("expected 'backend', got %q", result)
+	}
+}
+
+func TestDetectRoomFromPath_DocsDir(t *testing.T) {
+	result := detectRoomFromPath("/project/docs/readme.md")
+	if result != "documentation" {
+		t.Errorf("expected 'documentation', got %q", result)
+	}
+}
+
+func TestDetectRoomFromPath_TestDir(t *testing.T) {
+	result := detectRoomFromPath("/project/tests/unit_test.go")
+	if result != "testing" {
+		t.Errorf("expected 'testing', got %q", result)
+	}
+}
+
+func TestDetectRoomFromPath_General(t *testing.T) {
+	result := detectRoomFromPath("/project/misc/random.xyz")
+	if result != "general" {
+		t.Errorf("expected 'general' fallback, got %q", result)
+	}
+}

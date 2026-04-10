@@ -15,11 +15,13 @@ import (
 	"github.com/knights-analytics/hugot/pipelines"
 )
 
-// maxTokens is set to match ChromaDB's ONNXMiniLM_L6_V2 which uses
-// tokenizer.enable_truncation(max_length=256). We use 170 words because
-// BERT's WordPiece tokenizer produces ~1.5 subword tokens per English word.
-// 170 × 1.5 ≈ 255 tokens, safely within the 256 limit.
-const maxTokens = 170
+// maxTokens is a conservative word-count limit to keep subword token counts
+// well within GoMLX's 512-position-embedding limit. We use 100 words because
+// in worst-case technical text, BERT's WordPiece tokenizer can produce up to
+// 4 subword tokens per word (100 × 4 = 400, safely below 512).
+// Chrome's ONNXMiniLM_L6_V2 uses tokenizer.enable_truncation(max_length=256),
+// which is stricter; our 100-word limit is approximately equivalent.
+const maxTokens = 100
 
 // Embedder generates text embeddings using hugot (Hugging Face ONNX runtime).
 type Embedder struct {

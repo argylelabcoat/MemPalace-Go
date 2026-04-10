@@ -130,6 +130,17 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 	// The search embedder is the first worker's embedder (search is serial).
 	searchEmb := embs[0]
 
+	// Pre-compute a cross-question session embedding cache. Many sessions appear
+	// in multiple questions; embedding them once and reusing the vectors avoids
+	// redundant GEMM work across the benchmark run.
+	fmt.Fprintf(os.Stderr, "Pre-computing session embedding cache...\n")
+	cacheStart := time.Now()
+	sessionCache, err := BuildSessionCache(ctx, embs, entries, mode, encoder)
+	if err != nil {
+		return nil, fmt.Errorf("build session cache: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Cache built: %d unique sessions in %v\n", len(sessionCache), time.Since(cacheStart).Round(time.Millisecond))
+
 	type corpusResult struct {
 		store     *govector.Store
 		corpusIDs []string
@@ -138,11 +149,12 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 	}
 
 	// Phase 1: build all corpora in parallel across the worker pool.
+	// Each worker reads from the shared sessionCache (read-only, safe).
 	embedStart := time.Now()
 	cResults, err := runWorkerPoolWithResource(entries, embs,
 		func(emb *embedder.Embedder, entry Entry) (corpusResult, error) {
 			t0 := time.Now()
-			store, ids, err := buildCorpus(ctx, emb, entry, mode, encoder)
+			store, ids, err := buildCorpus(ctx, emb, entry, mode, encoder, sessionCache)
 			dur := time.Since(t0)
 			return corpusResult{store: store, corpusIDs: ids, embedDur: dur, entry: entry}, err
 		},
@@ -263,7 +275,7 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 	return result, nil
 }
 
-func buildCorpus(ctx context.Context, emb *embedder.Embedder, entry Entry, mode string, encoder *dialect.Encoder) (*govector.Store, []string, error) {
+func buildCorpus(ctx context.Context, emb *embedder.Embedder, entry Entry, mode string, encoder *dialect.Encoder, cache map[string][]float32) (*govector.Store, []string, error) {
 	store, err := govector.NewStore(filepath.Join(os.TempDir(), fmt.Sprintf("bench_%d", time.Now().UnixNano())), 384)
 	if err != nil {
 		return nil, nil, err
@@ -310,14 +322,30 @@ func buildCorpus(ctx context.Context, emb *embedder.Embedder, entry Entry, mode 
 		return store, nil, nil
 	}
 
-	// Second pass: batch-embed all texts at once
-	texts := make([]string, len(sessions))
+	// Second pass: resolve vectors — use cache if available, embed the rest.
+	vectors := make([][]float32, len(sessions))
+	var toEmbed []int // indices that still need embedding
 	for i, s := range sessions {
-		texts[i] = s.text
+		if cache != nil {
+			if v, ok := cache[s.text]; ok {
+				vectors[i] = v
+				continue
+			}
+		}
+		toEmbed = append(toEmbed, i)
 	}
-	vectors, err := emb.CreateEmbeddings(ctx, texts)
-	if err != nil {
-		return nil, nil, fmt.Errorf("batch embed: %w", err)
+	if len(toEmbed) > 0 {
+		missingTexts := make([]string, len(toEmbed))
+		for j, idx := range toEmbed {
+			missingTexts[j] = sessions[idx].text
+		}
+		vecs, err := emb.CreateEmbeddings(ctx, missingTexts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("batch embed: %w", err)
+		}
+		for j, idx := range toEmbed {
+			vectors[idx] = vecs[j]
+		}
 	}
 
 	// Third pass: store vectors

@@ -37,6 +37,26 @@ func (s *Store) Add(id string, vector []float32, payload map[string]any) error {
 	}})
 }
 
+// Point is a pre-constructed vector with its payload.
+type Point struct {
+	ID      string
+	Vector  []float32
+	Payload map[string]any
+}
+
+// AddBatch stores multiple points in a single upsert call.
+func (s *Store) AddBatch(points []Point) error {
+	ps := make([]core.PointStruct, len(points))
+	for i, p := range points {
+		ps[i] = core.PointStruct{
+			ID:      p.ID,
+			Vector:  p.Vector,
+			Payload: core.Payload(p.Payload),
+		}
+	}
+	return s.collection.Upsert(ps)
+}
+
 func (s *Store) Search(query []float32, limit int, filter map[string]any) ([]SearchResult, error) {
 	var cf *core.Filter
 	if len(filter) > 0 {

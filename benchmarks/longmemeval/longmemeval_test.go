@@ -1,8 +1,33 @@
 package longmemeval
 
 import (
+	"strings"
 	"testing"
+	"time"
 )
+
+// --- formatProgressLine tests ---
+
+func TestFormatProgressLine_ContainsPhaseTimings(t *testing.T) {
+	timing := QuestionTiming{
+		Embed:  2300 * time.Millisecond,
+		Search: 12 * time.Millisecond,
+		Score:  500 * time.Microsecond,
+	}
+	line := formatProgressLine(1, 10, 1.0, 1.0, 0.923, "HIT", timing)
+
+	for _, want := range []string{"embed=", "search=", "score="} {
+		if !strings.Contains(line, want) {
+			t.Errorf("progress line missing %q: %s", want, line)
+		}
+	}
+	if !strings.Contains(line, "[1/10]") {
+		t.Errorf("progress line missing question index: %s", line)
+	}
+	if !strings.Contains(line, "HIT") {
+		t.Errorf("progress line missing status: %s", line)
+	}
+}
 
 // --- mapCorpusToSessionIDs tests ---
 

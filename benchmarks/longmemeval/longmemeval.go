@@ -55,6 +55,20 @@ type KResult struct {
 
 var evalKs = []int{1, 3, 5, 10, 30, 50}
 
+// QuestionTiming holds per-phase wall-clock durations for a single benchmark question.
+type QuestionTiming struct {
+	Embed  time.Duration // corpus build: batch embedding + vector store writes
+	Search time.Duration // vector similarity search
+	Score  time.Duration // recall/NDCG scoring
+}
+
+// formatProgressLine returns the progress string printed after each question.
+func formatProgressLine(idx, total int, r5, r10, ndcg10 float64, status string, t QuestionTiming) string {
+	return fmt.Sprintf("[%d/%d] embed=%v search=%v score=%v R@5=%.0f R@10=%.0f NDCG@10=%.3f %s",
+		idx, total, t.Embed.Round(time.Millisecond), t.Search.Round(time.Millisecond), t.Score.Round(time.Microsecond),
+		r5, r10, ndcg10, status)
+}
+
 func Run(dataFile string, mode string, granularity string, limit int, skip int, topK int) (*Result, error) {
 	ctx := context.Background()
 	data, err := os.ReadFile(dataFile)
@@ -98,7 +112,9 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 	defer emb.Close()
 
 	for _, entry := range entries {
+		t0 := time.Now()
 		store, corpusIDs, err := buildCorpus(ctx, emb, entry, mode, encoder)
+		embedDur := time.Since(t0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error building corpus: %v\n", err)
 			continue
@@ -107,13 +123,16 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 			fmt.Fprintf(os.Stderr, "Warning: entry %s has 0 corpus IDs\n", entry.QuestionID)
 		}
 
+		t1 := time.Now()
 		searcher := search.NewSearcher(store, emb)
 		results, err := searcher.Search(ctx, entry.Question, "", "", topK)
+		searchDur := time.Since(t1)
 		store.Close() // release file handles and temp storage after each entry
 		if err != nil {
 			continue
 		}
 
+		t2 := time.Now()
 		var retrievedIDs []string
 		for _, r := range results {
 			retrievedIDs = append(retrievedIDs, r.Metadata["corpus_id"])
@@ -135,6 +154,7 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 		// against entry.AnswerSessionIDs (which are session IDs) work correctly.
 		allHaystackSessionIDs := mapCorpusToSessionIDs(corpusIDs, entry)
 		ndcg10 := benchmarks.NDCG(retrievedSessionIDs, entry.AnswerSessionIDs, allHaystackSessionIDs, 10)
+		scoreDur := time.Since(t2)
 
 		if r5 > 0 {
 			hits5++
@@ -174,8 +194,8 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 		if r5 > 0 {
 			status = "HIT"
 		}
-		fmt.Printf("[%d/%d] R@5=%.0f R@10=%.0f NDCG@10=%.3f %s\n",
-			totalQ, len(entries), r5, r10, ndcg10, status)
+		timing := QuestionTiming{Embed: embedDur, Search: searchDur, Score: scoreDur}
+		fmt.Println(formatProgressLine(totalQ, len(entries), r5, r10, ndcg10, status, timing))
 	}
 
 	result.TotalQ = totalQ
@@ -208,8 +228,12 @@ func buildCorpus(ctx context.Context, emb *embedder.Embedder, entry Entry, mode 
 		return nil, nil, err
 	}
 
-	var corpusIDs []string
-	corpusIdx := 0
+	// First pass: collect all texts
+	type sessionInfo struct {
+		sessionID string
+		text      string
+	}
+	var sessions []sessionInfo
 
 	for sessIdx, session := range entry.HaystackSessions {
 		if sessIdx >= len(entry.HaystackSessionIDs) {
@@ -238,21 +262,42 @@ func buildCorpus(ctx context.Context, emb *embedder.Embedder, entry Entry, mode 
 		if mode == "aaak" {
 			sessionText = encoder.Compress(sessionText, map[string]string{})
 		}
-
-		vector, err := emb.CreateEmbedding(ctx, sessionText)
-		if err != nil {
-			continue
-		}
-
-		corpusID := fmt.Sprintf("%s_turn_0", sessionID)
-		corpusIDs = append(corpusIDs, corpusID)
-		payload := map[string]any{
-			"corpus_id": corpusID, "session_id": sessionID,
-			"sess_idx": sessIdx, "content": sessionText,
-		}
-		store.Add(fmt.Sprintf("doc_%d", corpusIdx), vector, payload)
-		corpusIdx++
+		sessions = append(sessions, sessionInfo{sessionID: sessionID, text: sessionText})
 	}
+
+	if len(sessions) == 0 {
+		return store, nil, nil
+	}
+
+	// Second pass: batch-embed all texts at once
+	texts := make([]string, len(sessions))
+	for i, s := range sessions {
+		texts[i] = s.text
+	}
+	vectors, err := emb.CreateEmbeddings(ctx, texts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("batch embed: %w", err)
+	}
+
+	// Third pass: store vectors
+	var corpusIDs []string
+	points := make([]govector.Point, len(vectors))
+	for i, vec := range vectors {
+		corpusID := fmt.Sprintf("%s_turn_0", sessions[i].sessionID)
+		corpusIDs = append(corpusIDs, corpusID)
+		points[i] = govector.Point{
+			ID:     fmt.Sprintf("doc_%d", i),
+			Vector: vec,
+			Payload: map[string]any{
+				"corpus_id": corpusID, "session_id": sessions[i].sessionID,
+				"sess_idx": i, "content": sessions[i].text,
+			},
+		}
+	}
+	if err := store.AddBatch(points); err != nil {
+		return nil, nil, err
+	}
+
 	return store, corpusIDs, nil
 }
 

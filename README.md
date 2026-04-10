@@ -54,13 +54,59 @@ mempalace-go uses [hugot](https://github.com/knights-analytics/hugot) for ONNX-b
 - Go 1.26.2 or later
 - ONNX embedding model (auto-downloaded by hugot on first run)
 
-### Build from Source
+## Building
+
+### Standard Build (pure Go, no CGo)
 
 ```bash
-git clone https://github.com/argylelabcoat/mempalace-go.git
-cd mempalace-go
-go build -buildvcs=false -o mempalace-go .
+go build -o mempalace-go .
+# or
+make build
 ```
+
+No native dependencies required. Uses hugot's pure-Go backend.
+
+### ORT Build (Apple Silicon acceleration)
+
+The ORT build enables [ONNX Runtime](https://onnxruntime.ai/) with the CoreML execution provider on darwin/arm64, which allows embedding inference to run on the GPU or ANE where the model graph is supported.
+
+**Step 1: Download `libtokenizers.a`**
+
+The ORT backend requires `libtokenizers.a`, a pre-built Rust library for fast BERT tokenization. Download the darwin/arm64 build once:
+
+```bash
+mkdir -p ~/lib
+curl -fSL https://github.com/daulet/tokenizers/releases/download/v1.26.0/libtokenizers.darwin-aarch64.tar.gz \
+    | tar -xz -C ~/lib/
+```
+
+**Step 2: Build with ORT tag**
+
+```bash
+export CGO_LDFLAGS="-L${HOME}/lib"
+make build-ort
+# equivalent to: go build -tags ORT ./...
+```
+
+**Step 3 (optional): Install system-wide to avoid the env var**
+
+If you prefer not to set `CGO_LDFLAGS` every time, copy the library to a standard system path:
+
+```bash
+sudo cp ~/lib/libtokenizers.a /usr/local/lib/libtokenizers.a
+# Then: make build-ort  (no CGO_LDFLAGS needed)
+```
+
+### Makefile targets
+
+| Target | Description |
+|---|---|
+| `make build` | Pure Go build, no CGo |
+| `make build-ort` | ORT + CoreML build (requires `libtokenizers.a`) |
+| `make test` | Run all tests (pure Go) |
+| `make test-ort` | Run all tests with ORT backend |
+| `make bench-perf` | Run embedding/storage timing benchmark (pure Go) |
+| `make bench-perf-ort` | Run benchmark with ORT + CoreML |
 
 ## Configuration
 

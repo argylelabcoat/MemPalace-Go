@@ -4,6 +4,7 @@ package search
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/argylelabcoat/mempalace-go/internal/palace"
 	"github.com/argylelabcoat/mempalace-go/storage/govector"
@@ -12,12 +13,15 @@ import (
 type Store interface {
 	Search(query []float32, limit int, filter map[string]any) ([]govector.SearchResult, error)
 	Add(id string, vector []float32, payload map[string]any) error
+	AddBatch(points []govector.Point) error
 	Delete(id string) error
 	ListAll(limit int) ([]govector.SearchResult, error)
+	Close() error
 }
 
 type Embedder interface {
 	CreateEmbedding(ctx context.Context, text string) ([]float32, error)
+	CreateEmbeddings(ctx context.Context, texts []string) ([][]float32, error)
 }
 
 type LlamaClient interface {
@@ -118,6 +122,23 @@ func (s *Searcher) Store(ctx context.Context, drawer palace.Drawer) error {
 	}
 
 	return s.store.Add(drawer.ID, vector, payload)
+}
+
+// StoreVectors stores pre-computed embeddings with payloads.
+func (s *Searcher) StoreVectors(ids []string, vectors [][]float32, payloads []map[string]any) error {
+	if len(ids) != len(vectors) || len(ids) != len(payloads) {
+		return fmt.Errorf("mismatched lengths: ids=%d, vectors=%d, payloads=%d",
+			len(ids), len(vectors), len(payloads))
+	}
+	points := make([]govector.Point, len(ids))
+	for i := range ids {
+		points[i] = govector.Point{
+			ID:      ids[i],
+			Vector:  vectors[i],
+			Payload: payloads[i],
+		}
+	}
+	return s.store.AddBatch(points)
 }
 
 func (s *Searcher) ListWings(ctx context.Context) ([]WingInfo, error) {

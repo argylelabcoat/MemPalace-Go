@@ -5,6 +5,37 @@ import (
 	"testing"
 )
 
+// TestCreateEmbeddings_LargeBatch verifies that batches larger than the internal
+// chunk boundary are handled correctly — all texts get embeddings, none are dropped.
+// This exercises the chunk-splitting logic across the boundary (currently 64).
+func TestCreateEmbeddings_LargeBatch(t *testing.T) {
+	emb, err := New("", "")
+	if err != nil {
+		t.Fatalf("create embedder: %v", err)
+	}
+	defer emb.Close()
+
+	ctx := context.Background()
+	// 65 texts: one more than the chunk size so we exercise the split.
+	texts := make([]string, 65)
+	for i := range texts {
+		texts[i] = "the quick brown fox jumps over the lazy dog"
+	}
+
+	vecs, err := emb.CreateEmbeddings(ctx, texts)
+	if err != nil {
+		t.Fatalf("CreateEmbeddings: %v", err)
+	}
+	if len(vecs) != len(texts) {
+		t.Errorf("expected %d embeddings, got %d", len(texts), len(vecs))
+	}
+	for i, v := range vecs {
+		if len(v) == 0 {
+			t.Errorf("embedding %d is empty", i)
+		}
+	}
+}
+
 // BenchmarkSingleEmbed measures single-text embedding latency.
 // Run with: go test -bench=BenchmarkSingleEmbed -benchtime=10s ./internal/embedder/
 // With ORT: CGO_LDFLAGS="-L${HOME}/lib" go test -tags ORT -bench=BenchmarkSingleEmbed -benchtime=10s ./internal/embedder/

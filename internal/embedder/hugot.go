@@ -112,7 +112,7 @@ func (e *Embedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]fl
 		truncated[i] = truncateText(t)
 	}
 
-	const chunkSize = 32
+	const chunkSize = 64
 	allEmbeddings := make([][]float32, 0, len(texts))
 
 	for i := 0; i < len(truncated); i += chunkSize {

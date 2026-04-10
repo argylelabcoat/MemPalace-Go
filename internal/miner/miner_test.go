@@ -235,3 +235,27 @@ func TestDetectRoomFromPath_General(t *testing.T) {
 		t.Errorf("expected 'general' fallback, got %q", result)
 	}
 }
+
+type mockRoomDetector struct {
+	result string
+}
+
+func (m *mockRoomDetector) DetectRoom(filePath string, content string, projectPath string) string {
+	return m.result
+}
+
+func TestMinerSetRoomDetector(t *testing.T) {
+	ResetContentHashIndex()
+	m := NewMiner(nil)
+	detector := &mockRoomDetector{result: "custom-room"}
+	m.SetRoomDetector(detector)
+
+	if m.roomDetector == nil {
+		t.Error("expected roomDetector to be set")
+	}
+
+	result := m.roomDetector.DetectRoom("/some/path", "content", "/some")
+	if result != "custom-room" {
+		t.Errorf("expected 'custom-room', got %q", result)
+	}
+}

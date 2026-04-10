@@ -14,6 +14,7 @@ import (
 	"github.com/argylelabcoat/mempalace-go/internal/layers"
 	"github.com/argylelabcoat/mempalace-go/internal/miner"
 	"github.com/argylelabcoat/mempalace-go/internal/palace"
+	"github.com/argylelabcoat/mempalace-go/internal/room"
 	"github.com/argylelabcoat/mempalace-go/internal/search"
 	"github.com/argylelabcoat/mempalace-go/pkg/wal"
 	govector "github.com/argylelabcoat/mempalace-go/storage/govector"
@@ -118,6 +119,13 @@ func newMineCmd() *cobra.Command {
 			}
 
 			m := miner.NewMiner(searcher)
+
+			roomDetector, err := room.NewConfigBasedRoomDetector(args[0])
+			if err != nil {
+				fmt.Printf("Warning: could not load room config: %v\n", err)
+			} else {
+				m.SetRoomDetector(roomDetector)
+			}
 			return m.MineProject(ctx, args[0], "")
 		},
 	}

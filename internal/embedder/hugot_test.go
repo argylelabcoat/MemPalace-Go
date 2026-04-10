@@ -82,3 +82,33 @@ func BenchmarkBatchEmbed(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkCorpusEmbed mirrors the real LongMemEval workload: one question's
+// worth of corpus (~50 sessions, each ~80 words). Profile with:
+//
+//	go test -bench=BenchmarkCorpusEmbed -benchtime=5x -cpuprofile=cpu.prof ./internal/embedder/
+//	go tool pprof -top cpu.prof
+func BenchmarkCorpusEmbed(b *testing.B) {
+	emb, err := New("", "")
+	if err != nil {
+		b.Fatalf("create embedder: %v", err)
+	}
+	defer emb.Close()
+
+	ctx := context.Background()
+
+	// ~80-word sentence — realistic LongMemEval session length.
+	single := "the quick brown fox jumped over the lazy dog near the river bank on a warm summer afternoon while birds sang in the trees and children played nearby along the winding path through the ancient forest full of tall oaks and whispering pines under a clear blue sky"
+	texts := make([]string, 50)
+	for i := range texts {
+		texts[i] = single
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := emb.CreateEmbeddings(ctx, texts)
+		if err != nil {
+			b.Fatalf("corpus embed: %v", err)
+		}
+	}
+}

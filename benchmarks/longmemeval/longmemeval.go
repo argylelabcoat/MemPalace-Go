@@ -103,31 +103,72 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 	totalNDCG10 := 0.0
 	perTypeResults := make(map[string]*TypeResult)
 
-	// Create one embedder for the entire benchmark run — loading the ONNX model
-	// once is much cheaper than reloading it for every question entry.
-	emb, err := embedder.New("", "")
-	if err != nil {
-		return nil, fmt.Errorf("create embedder: %w", err)
-	}
-	defer emb.Close()
+	// embedWorkers is the number of parallel corpus-embedding goroutines.
+	// Each worker loads its own hugot session (~90 MB RAM). Set to 1 to disable.
+	const embedWorkers = 4
 
-	for _, entry := range entries {
-		t0 := time.Now()
-		store, corpusIDs, err := buildCorpus(ctx, emb, entry, mode, encoder)
-		embedDur := time.Since(t0)
+	// Create a pool of embedders — one per worker. Loading the ONNX model is
+	// done once per worker here, amortised across all questions.
+	fmt.Fprintf(os.Stderr, "Loading %d embedder(s)...\n", embedWorkers)
+	embs := make([]*embedder.Embedder, embedWorkers)
+	for i := range embs {
+		e, err := embedder.New("", "")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error building corpus: %v\n", err)
+			for j := 0; j < i; j++ {
+				embs[j].Close()
+			}
+			return nil, fmt.Errorf("create embedder %d: %w", i, err)
+		}
+		embs[i] = e
+	}
+	defer func() {
+		for _, e := range embs {
+			e.Close()
+		}
+	}()
+
+	// The search embedder is the first worker's embedder (search is serial).
+	searchEmb := embs[0]
+
+	type corpusResult struct {
+		store     *govector.Store
+		corpusIDs []string
+		embedDur  time.Duration
+		entry     Entry
+	}
+
+	// Phase 1: build all corpora in parallel across the worker pool.
+	embedStart := time.Now()
+	cResults, err := runWorkerPoolWithResource(entries, embs,
+		func(emb *embedder.Embedder, entry Entry) (corpusResult, error) {
+			t0 := time.Now()
+			store, ids, err := buildCorpus(ctx, emb, entry, mode, encoder)
+			dur := time.Since(t0)
+			return corpusResult{store: store, corpusIDs: ids, embedDur: dur, entry: entry}, err
+		},
+	)
+	totalEmbedWall := time.Since(embedStart)
+	if err != nil {
+		return nil, fmt.Errorf("parallel corpus build: %w", err)
+	}
+	_ = totalEmbedWall // available for summary logging if desired
+
+	// Phase 2: search + score serially (fast — dominated by embed).
+	for _, cr := range cResults {
+		entry := cr.entry
+		if cr.store == nil {
+			fmt.Fprintf(os.Stderr, "Error building corpus for entry %s\n", entry.QuestionID)
 			continue
 		}
-		if len(corpusIDs) == 0 {
+		if len(cr.corpusIDs) == 0 {
 			fmt.Fprintf(os.Stderr, "Warning: entry %s has 0 corpus IDs\n", entry.QuestionID)
 		}
 
 		t1 := time.Now()
-		searcher := search.NewSearcher(store, emb)
+		searcher := search.NewSearcher(cr.store, searchEmb)
 		results, err := searcher.Search(ctx, entry.Question, "", "", topK)
 		searchDur := time.Since(t1)
-		store.Close() // release file handles and temp storage after each entry
+		cr.store.Close() // release file handles and temp storage after each entry
 		if err != nil {
 			continue
 		}
@@ -152,7 +193,7 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 		r10 := benchmarks.RecallAny(top10, entry.AnswerSessionIDs)
 		// Use session IDs (not raw corpus IDs) for NDCG so relevance comparisons
 		// against entry.AnswerSessionIDs (which are session IDs) work correctly.
-		allHaystackSessionIDs := mapCorpusToSessionIDs(corpusIDs, entry)
+		allHaystackSessionIDs := mapCorpusToSessionIDs(cr.corpusIDs, entry)
 		ndcg10 := benchmarks.NDCG(retrievedSessionIDs, entry.AnswerSessionIDs, allHaystackSessionIDs, 10)
 		scoreDur := time.Since(t2)
 
@@ -194,7 +235,7 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 		if r5 > 0 {
 			status = "HIT"
 		}
-		timing := QuestionTiming{Embed: embedDur, Search: searchDur, Score: scoreDur}
+		timing := QuestionTiming{Embed: cr.embedDur, Search: searchDur, Score: scoreDur}
 		fmt.Println(formatProgressLine(totalQ, len(entries), r5, r10, ndcg10, status, timing))
 	}
 

@@ -8,20 +8,22 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/options"
 	"github.com/knights-analytics/hugot/pipelines"
 )
 
-// maxTokens is a conservative word-count limit to keep subword token counts
-// well within GoMLX's 512-position-embedding limit. We use 100 words because
-// in worst-case technical text, BERT's WordPiece tokenizer can produce up to
-// 4 subword tokens per word (100 × 4 = 400, safely below 512).
-// Chrome's ONNXMiniLM_L6_V2 uses tokenizer.enable_truncation(max_length=256),
-// which is stricter; our 100-word limit is approximately equivalent.
-const maxTokens = 100
+// maxRunes is a conservative character (Unicode code-point) limit to keep
+// subword token counts well within GoMLX's 512-position-embedding limit.
+// Word-count limits are unreliable because:
+//   - Long URLs tokenize ~1 token per character
+//   - Unicode math/symbol characters can produce many tokens per code-point
+//
+// Using 400 runes as the limit: in the worst case (URLs, ASCII only) each
+// rune produces one token, giving ≤ 400 tokens — safely under the 512 limit.
+// For normal prose this allows ~60–80 words of meaningful content.
+const maxRunes = 400
 
 // Embedder generates text embeddings using hugot (Hugging Face ONNX runtime).
 type Embedder struct {
@@ -76,14 +78,16 @@ func New(modelName string, modelsDir string) (*Embedder, error) {
 	}, nil
 }
 
-// truncateText limits text to maxTokens words to stay within the model's
-// 512-token position embedding limit.
+// truncateText limits text to maxRunes Unicode code-points to stay within
+// the model's 512-token position-embedding limit.
+// Word-count limits are unreliable because URLs and Unicode math symbols can
+// produce far more than 4 subword tokens per word; character limits are safe.
 func truncateText(text string) string {
-	words := strings.Fields(text)
-	if len(words) <= maxTokens {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
 		return text
 	}
-	return strings.Join(words[:maxTokens], " ")
+	return string(runes[:maxRunes])
 }
 
 // CreateEmbedding generates a float32 vector for the given text.

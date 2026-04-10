@@ -2,8 +2,46 @@ package embedder
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
+
+// TestTruncateText verifies that truncateText keeps output within maxRunes
+// even for pathological inputs (long URLs, Unicode math symbols).
+func TestTruncateText(t *testing.T) {
+	// Normal short text — should pass through unchanged.
+	short := "hello world"
+	if got := truncateText(short); got != short {
+		t.Errorf("short text modified: got %q, want %q", got, short)
+	}
+
+	// Text exactly at the limit — must not be truncated.
+	atLimit := strings.Repeat("a", maxRunes)
+	if got := truncateText(atLimit); got != atLimit {
+		t.Errorf("text at limit was modified")
+	}
+
+	// Text longer than the limit — must be truncated to exactly maxRunes runes.
+	long := strings.Repeat("a", maxRunes+100)
+	got := truncateText(long)
+	if len([]rune(got)) != maxRunes {
+		t.Errorf("truncated text has %d runes, want %d", len([]rune(got)), maxRunes)
+	}
+
+	// Long URL (single "word") — must be truncated to maxRunes runes.
+	longURL := "https://" + strings.Repeat("x", maxRunes+50) + ".com/path/to/image.jpg"
+	gotURL := truncateText(longURL)
+	if len([]rune(gotURL)) > maxRunes {
+		t.Errorf("URL not truncated: %d runes > %d", len([]rune(gotURL)), maxRunes)
+	}
+
+	// Unicode math symbols — each rune is a single code-point.
+	mathText := strings.Repeat("𝐴", maxRunes+10)
+	gotMath := truncateText(mathText)
+	if len([]rune(gotMath)) > maxRunes {
+		t.Errorf("unicode math not truncated: %d runes > %d", len([]rune(gotMath)), maxRunes)
+	}
+}
 
 // TestCreateEmbeddings_LargeBatch verifies that batches larger than the internal
 // chunk boundary are handled correctly — all texts get embeddings, none are dropped.

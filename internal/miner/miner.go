@@ -642,3 +642,11 @@ func DetectRoomFromContent(content string) string {
 	}
 	return bestRoom
 }
+
+func DetectRoomCombined(path string, content string) string {
+	room := detectRoomFromPath(path)
+	if room != "general" {
+		return room
+	}
+	return DetectRoomFromContent(content)
+}

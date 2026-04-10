@@ -259,3 +259,46 @@ func TestMinerSetRoomDetector(t *testing.T) {
 		t.Errorf("expected 'custom-room', got %q", result)
 	}
 }
+
+func TestSaveAndLoadContentHashIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	ResetContentHashIndex()
+
+	RegisterContentHash("/test/file1.go", "hash1")
+	RegisterContentHash("/test/file2.go", "hash2")
+
+	err := SaveContentHashIndex(tmpDir)
+	if err != nil {
+		t.Fatalf("SaveContentHashIndex() error = %v", err)
+	}
+
+	ResetContentHashIndex()
+
+	err = LoadContentHashIndex(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadContentHashIndex() error = %v", err)
+	}
+
+	if !IsContentAlreadyMined("/test/file1.go", "hash1") {
+		t.Error("expected file1 to be in loaded index")
+	}
+
+	if !IsContentAlreadyMined("/test/file2.go", "hash2") {
+		t.Error("expected file2 to be in loaded index")
+	}
+
+	if IsContentAlreadyMined("/test/other.go", "hash") {
+		t.Error("expected unknown file to not be in loaded index")
+	}
+}
+
+func TestLoadContentHashIndex_NoFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	ResetContentHashIndex()
+
+	err := LoadContentHashIndex(tmpDir)
+	if err != nil {
+		t.Errorf("expected no error for missing file, got %v", err)
+	}
+}

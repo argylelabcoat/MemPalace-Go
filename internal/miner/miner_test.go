@@ -302,3 +302,40 @@ func TestLoadContentHashIndex_NoFile(t *testing.T) {
 		t.Errorf("expected no error for missing file, got %v", err)
 	}
 }
+
+func TestDetectRoomCombined(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		content  string
+		expected string
+	}{
+		{
+			name:     "path match takes priority",
+			path:     "/project/frontend/button.tsx",
+			content:  "this is all about to API server handlers",
+			expected: "frontend",
+		},
+		{
+			name:     "content match when path is generic",
+			path:     "/project/src/utils.go",
+			content:  "package api\n\n// Handler handles API requests for server",
+			expected: "backend",
+		},
+		{
+			name:     "general fallback",
+			path:     "/project/misc/notes.txt",
+			content:  "random notes",
+			expected: "general",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DetectRoomCombined(tt.path, tt.content)
+			if result != tt.expected {
+				t.Errorf("DetectRoomCombined() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}

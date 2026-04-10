@@ -9,6 +9,11 @@ import (
 	"github.com/spf13/viper"
 )
 
+type RoomConfig struct {
+	Name     string   `mapstructure:"name"`
+	Keywords []string `mapstructure:"keywords"`
+}
+
 type Config struct {
 	PalacePath     string              `mapstructure:"palace_path"`
 	CollectionName string              `mapstructure:"collection_name"`
@@ -17,6 +22,7 @@ type Config struct {
 	HallKeywords   map[string][]string `mapstructure:"hall_keywords"`
 	ModelName      string              `mapstructure:"model_name"`
 	ModelsDir      string              `mapstructure:"models_dir"`
+	Rooms          []RoomConfig        `mapstructure:"rooms"`
 }
 
 var DefaultConfig = Config{

@@ -104,3 +104,36 @@ func TestGetIdentityPath(t *testing.T) {
 		t.Errorf("GetIdentityPath() = %v, err = %v, want %v", got, err, expected)
 	}
 }
+
+func TestLoadConfigWithRooms(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	err := os.WriteFile(configPath, []byte(`{
+		"palace_path": "/test/palace",
+		"collection_name": "test_collection",
+		"rooms": [
+			{"name": "frontend", "keywords": ["ui", "components", "views"]},
+			{"name": "backend", "keywords": ["api", "server", "handlers"]},
+			{"name": "general", "keywords": []}
+		],
+		"model_name": "sentence-transformers/all-MiniLM-L6-v2"
+	}`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if len(cfg.Rooms) != 3 {
+		t.Fatalf("expected 3 rooms, got %d", len(cfg.Rooms))
+	}
+	if cfg.Rooms[0].Name != "frontend" {
+		t.Errorf("Rooms[0].Name = %q, want %q", cfg.Rooms[0].Name, "frontend")
+	}
+	if len(cfg.Rooms[0].Keywords) != 3 {
+		t.Errorf("Rooms[0].Keywords length = %d, want 3", len(cfg.Rooms[0].Keywords))
+	}
+}

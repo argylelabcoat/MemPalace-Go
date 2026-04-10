@@ -242,22 +242,58 @@ func updateMtime(absPath string, modTime time.Time) {
 }
 
 // chunkContent splits content into overlapping chunks.
+// It tries to split on paragraph/line boundaries for more semantically meaningful chunks.
 func chunkContent(content string, chunkSize, overlap int) []string {
+	// Clean up
+	content = strings.TrimSpace(content)
+	if len(content) == 0 {
+		return []string{}
+	}
+
 	if len(content) <= chunkSize {
 		return []string{content}
 	}
 
 	var chunks []string
-	for i := 0; i < len(content); i += chunkSize - overlap {
-		end := i + chunkSize
+	start := 0
+
+	for start < len(content) {
+		end := start + chunkSize
 		if end > len(content) {
 			end = len(content)
 		}
-		chunks = append(chunks, content[i:end])
+
+		// Try to break at paragraph boundary (double newline)
+		if end < len(content) {
+			newlinePos := strings.LastIndex(string(content[start:end]), "\n\n")
+			if newlinePos != -1 && newlinePos > chunkSize/2 {
+				// Found a good paragraph break
+				end = start + newlinePos
+			} else {
+				// Try to break at line boundary (single newline)
+				newlinePos = strings.LastIndex(string(content[start:end]), "\n")
+				if newlinePos != -1 && newlinePos > chunkSize/2 {
+					end = start + newlinePos
+				}
+			}
+		}
+
+		chunk := strings.TrimSpace(content[start:end])
+		if len(chunk) >= 50 { // MIN_CHUNK_SIZE equivalent
+			chunks = append(chunks, chunk)
+		}
+
 		if end == len(content) {
 			break
 		}
+
+		// Move start position, accounting for overlap
+		start = end - overlap
+		if start < 0 {
+			start = 0
+		}
 	}
+
 	return chunks
 }
 

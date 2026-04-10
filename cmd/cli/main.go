@@ -126,7 +126,27 @@ func newMineCmd() *cobra.Command {
 			} else {
 				m.SetRoomDetector(roomDetector)
 			}
-			return m.MineProject(ctx, args[0], "")
+
+			palaceDir := os.ExpandEnv(cfg.PalacePath)
+			if err := miner.LoadMtimeIndex(palaceDir); err != nil {
+				fmt.Printf("Warning: could not load mtime index: %v\n", err)
+			}
+			if err := miner.LoadContentHashIndex(palaceDir); err != nil {
+				fmt.Printf("Warning: could not load content hash index: %v\n", err)
+			}
+
+			if err := m.MineProject(ctx, args[0], ""); err != nil {
+				return err
+			}
+
+			if err := miner.SaveMtimeIndex(palaceDir); err != nil {
+				fmt.Printf("Warning: could not save mtime index: %v\n", err)
+			}
+			if err := miner.SaveContentHashIndex(palaceDir); err != nil {
+				fmt.Printf("Warning: could not save content hash index: %v\n", err)
+			}
+
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&mode, "mode", "projects", "Mining mode: 'projects' or 'convos'")

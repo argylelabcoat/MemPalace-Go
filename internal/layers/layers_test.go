@@ -36,6 +36,14 @@ func (m *mockStore) ListAll(limit int) ([]govector.SearchResult, error) {
 	return m.results, nil
 }
 
+func (m *mockStore) Close() error {
+	return nil
+}
+
+func (m *mockStore) AddBatch(points []govector.Point) error {
+	return nil
+}
+
 type mockEmbedder struct {
 	embedding []float32
 	err       error
@@ -46,6 +54,17 @@ func (m *mockEmbedder) CreateEmbedding(ctx context.Context, text string) ([]floa
 		return nil, m.err
 	}
 	return m.embedding, nil
+}
+
+func (m *mockEmbedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]float32, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	result := make([][]float32, len(texts))
+	for i := range texts {
+		result[i] = m.embedding
+	}
+	return result, nil
 }
 
 func newTestConfig() *config.Config {

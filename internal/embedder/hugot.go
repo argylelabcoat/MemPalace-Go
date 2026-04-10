@@ -42,15 +42,18 @@ func New(modelName string, modelsDir string) (*Embedder, error) {
 		return nil, fmt.Errorf("download model: %w", err)
 	}
 
-	// Try ORT (ONNX Runtime) first — faster than pure-Go on all hardware.
-	// On darwin/arm64 the bundled dylib already links CoreML + Metal, but we
-	// start with plain ORT CPU here to validate the build path.
-	session, err := hugot.NewORTSession(ortDylibOption())
+	// Try ORT + CoreML (Apple Silicon GPU/ANE acceleration).
+	session, err := hugot.NewORTSession(ortDylibOption(), options.WithCoreML(coreMLFlags()))
 	if err != nil {
-		// Fall back to pure-Go (no CGo required, works everywhere).
-		session, err = hugot.NewGoSession()
+		// CoreML unavailable (non-darwin, older macOS, or missing EP).
+		// Try plain ORT (CPU).
+		session, err = hugot.NewORTSession(ortDylibOption())
 		if err != nil {
-			return nil, fmt.Errorf("create session: %w", err)
+			// Final fallback: pure-Go (no CGo, works everywhere).
+			session, err = hugot.NewGoSession()
+			if err != nil {
+				return nil, fmt.Errorf("create session: %w", err)
+			}
 		}
 	}
 
@@ -136,6 +139,16 @@ func (e *Embedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]fl
 		allEmbeddings = append(allEmbeddings, output.Embeddings...)
 	}
 	return allEmbeddings, nil
+}
+
+// coreMLFlags returns CoreML execution provider options that allow the ANE,
+// GPU, and CPU to all be used. See:
+// https://onnxruntime.ai/docs/execution-providers/CoreML-ExecutionProvider.html
+func coreMLFlags() map[string]string {
+	return map[string]string{
+		// MLComputeUnitsAll (0) = CPU+GPU+ANE, CoreML decides optimal placement.
+		"MLComputeUnits": "0",
+	}
 }
 
 // ortDylibOption returns the hugot option that points ORT at the directory

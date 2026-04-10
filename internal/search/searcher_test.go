@@ -50,6 +50,21 @@ func (m *mockStore) Close() error {
 	return nil
 }
 
+func (m *mockStore) AddBatch(points []govector.Point) error {
+	return nil
+}
+
+func (m *mockEmbedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]float32, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	result := make([][]float32, len(texts))
+	for i := range texts {
+		result[i] = m.embedding
+	}
+	return result, nil
+}
+
 func TestNewSearcher(t *testing.T) {
 	store := &mockStore{}
 	llama := &mockEmbedder{}
@@ -193,6 +208,10 @@ func (m *mockStoreWithErr) ListAll(limit int) ([]govector.SearchResult, error) {
 
 func (m *mockStoreWithErr) Close() error {
 	return nil
+}
+
+func (m *mockStoreWithErr) AddBatch(points []govector.Point) error {
+	return m.err
 }
 
 func TestSearcherSearchStoreError(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/daulet/tokenizers"
+	"github.com/gomlx/go-huggingface/tokenizers/api"
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/options"
 	"github.com/knights-analytics/hugot/pipelines"
@@ -23,7 +23,6 @@ const maxTokens = 512
 type Embedder struct {
 	pipeline    *pipelines.FeatureExtractionPipeline
 	session     *hugot.Session
-	tokenizer   *tokenizers.Tokenizer
 	modelPath   string
 	modelsDir   string
 	modelName   string
@@ -49,12 +48,6 @@ func New(modelName string, modelsDir string) (*Embedder, error) {
 		modelPath: modelPath,
 		modelsDir: modelsDir,
 		modelName: modelName,
-	}
-
-	if err := e.loadTokenizer(); err != nil {
-		// Non-fatal: fall back to rune-based truncation.
-		// This can happen if tokenizer.json is missing or corrupted.
-		fmt.Fprintf(os.Stderr, "warning: tokenizer unavailable, falling back to rune truncation: %v\n", err)
 	}
 
 	// Try ORT + CoreML (Apple Silicon GPU/ANE acceleration).
@@ -90,58 +83,54 @@ func New(modelName string, modelsDir string) (*Embedder, error) {
 	return e, nil
 }
 
-// loadTokenizer loads the HuggingFace tokenizer from the model directory.
-func (e *Embedder) loadTokenizer() error {
-	// Try the model's tokenizer.json first.
-	tokenizerPath := filepath.Join(e.modelPath, "tokenizer.json")
-	if _, err := os.Stat(tokenizerPath); err == nil {
-		tok, err := tokenizers.FromFile(tokenizerPath)
-		if err == nil {
-			e.tokenizer = tok
-			return nil
-		}
-	}
-
-	// Fallback: check the sibling sentence-transformers directory (downloaded separately).
-	altPath := filepath.Join(e.modelsDir, "sentence-transformers_all-MiniLM-L6-v2", "tokenizer.json")
-	if _, err := os.Stat(altPath); err == nil {
-		tok, err := tokenizers.FromFile(altPath)
-		if err == nil {
-			e.tokenizer = tok
-			return nil
-		}
-	}
-
-	return fmt.Errorf("tokenizer.json not found in %s or %s", tokenizerPath, altPath)
-}
-
 // truncateText limits text to fit within the model's token limit.
-// Uses the actual tokenizer when available; falls back to rune-count truncation.
+// Uses hugot's own internal tokenizer to count tokens exactly,
+// then slices original text at byte-offset boundary when over-limit.
+// Falls back to rune-based truncation if internal tokenizer is unavailable.
 func (e *Embedder) truncateText(text string) string {
-	if e.tokenizer != nil {
-		return e.truncateByTokens(text)
+	tok := e.getHugotTokenizer()
+	if tok == nil {
+		return truncateByRunes(text)
 	}
+
+	result := tok.EncodeWithAnnotations(text)
+	if len(result.IDs) <= maxTokens {
+		return text
+	}
+
+	// IDs layout with special tokens: [CLS_ID, real1, ..., realN, SEP_ID]
+	// Spans layout: [{-1,-1}, {s1,e1}, ..., {sN,eN}, {-1,-1}]
+	// Max real tokens = maxTokens - 2 (reserve 2 for CLS + SEP).
+	maxRealTokens := maxTokens - 2
+
+	// Find byte boundary: spans[0]=CLS (special), spans[1]=first real token.
+	// The last allowed real token is at index maxRealTokens in spans array
+	// (index 0 is CLS, so real token i is at spans[i]).
+	if maxRealTokens < len(result.Spans) {
+		cutPoint := result.Spans[maxRealTokens].End
+		if cutPoint > 0 && cutPoint <= len(text) {
+			return text[:cutPoint]
+		}
+	}
+
 	return truncateByRunes(text)
 }
 
-// truncateByTokens encodes text, truncates to maxTokens, and decodes back to string.
-// This uses the full 512-token window instead of the conservative 400-rune limit.
-func (e *Embedder) truncateByTokens(text string) string {
-	tokenIDs, _ := e.tokenizer.Encode(text, false)
-	if len(tokenIDs) <= maxTokens {
-		return text
+// getHugotTokenizer returns the internal Go tokenizer from hugot's pipeline.
+// Returns nil if pipeline is not initialized or Go tokenizer is unavailable
+// (e.g., when using ORT/Rust backend instead of Go/XLA).
+func (e *Embedder) getHugotTokenizer() api.Tokenizer {
+	if e.pipeline == nil || e.pipeline.Model == nil {
+		return nil
 	}
-	// Decode the first maxTokens tokens back to a string.
-	truncated := e.tokenizer.Decode(tokenIDs[:maxTokens], false)
-	if truncated == "" {
-		return truncateByRunes(text)
+	tk := e.pipeline.Model.Tokenizer
+	if tk == nil || tk.GoTokenizer == nil {
+		return nil
 	}
-	return truncated
+	return tk.GoTokenizer.Tokenizer
 }
 
-// truncateByRunes is the fallback: limits text to ~400 Unicode code-points.
-// Word-count limits are unreliable because URLs and Unicode math symbols can
-// produce far more than 4 subword tokens per word; character limits are safe.
+// truncateByRunes is conservative fallback: limits text to ~400 Unicode code-points.
 func truncateByRunes(text string) string {
 	runes := []rune(text)
 	if len(runes) <= 400 {
@@ -150,7 +139,7 @@ func truncateByRunes(text string) string {
 	return string(runes[:400])
 }
 
-// CreateEmbedding generates a float32 vector for the given text.
+// CreateEmbedding generates a float32 vector for given text.
 func (e *Embedder) CreateEmbedding(ctx context.Context, text string) ([]float32, error) {
 	output, err := e.pipeline.RunPipeline([]string{e.truncateText(text)})
 	if err != nil {
@@ -166,13 +155,12 @@ func (e *Embedder) CreateEmbedding(ctx context.Context, text string) ([]float32,
 
 // CreateEmbeddings batch-embeds multiple texts in a single forward pass.
 // It processes texts in chunks of 64 (recommended by hugot) and handles
-// GoMLX graph shape mismatches by falling back to single embeddings when needed.
+// shape mismatches by falling back to single embeddings when needed.
 func (e *Embedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
 
-	// Truncate all texts first
 	truncated := make([]string, len(texts))
 	for i, t := range texts {
 		truncated[i] = e.truncateText(t)
@@ -187,7 +175,6 @@ func (e *Embedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]fl
 
 		output, err := e.pipeline.RunPipeline(chunk)
 		if err != nil {
-			// GoMLX graph shape mismatch: fall back to single embeddings
 			for _, text := range chunk {
 				single, err2 := e.pipeline.RunPipeline([]string{text})
 				if err2 != nil {
@@ -204,7 +191,7 @@ func (e *Embedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]fl
 	return allEmbeddings, nil
 }
 
-// coreMLFlags returns CoreML execution provider options that allow the ANE,
+// coreMLFlags returns CoreML execution provider options that allow ANE,
 // GPU, and CPU to all be used. See:
 // https://onnxruntime.ai/docs/execution-providers/CoreML-ExecutionProvider.html
 func coreMLFlags() map[string]string {
@@ -214,10 +201,10 @@ func coreMLFlags() map[string]string {
 	}
 }
 
-// ortDylibOption returns the hugot option that points ORT at the directory
+// ortDylibOption returns hugot option that points ORT at the directory
 // containing the arm64 dylib bundled inside yalue/onnxruntime_go when running
 // on darwin/arm64. options.WithOnnxLibraryPath expects a directory; it appends
-// the platform-specific filename internally.
+// platform-specific filename internally.
 // On other platforms returns a no-op option (ORT searches PATH/LD_LIBRARY_PATH).
 func ortDylibOption() options.WithOption {
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
@@ -245,11 +232,8 @@ func findOrtDylibDir() (string, error) {
 	return dir, nil
 }
 
-// Close releases the hugot session and tokenizer resources.
+// Close releases hugot session resources.
 func (e *Embedder) Close() {
-	if e.tokenizer != nil {
-		e.tokenizer.Close()
-	}
 	if e.session != nil {
 		e.session.Destroy()
 	}

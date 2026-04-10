@@ -64,10 +64,9 @@ func (s *Store) Search(query []float32, limit int, filter map[string]any) ([]Sea
 	// can't do OR natively — we fetch a larger set and post-filter.
 	searchLimit := limit
 	if hasIn {
-		searchLimit = limit * 10 // Fetch more to account for OR filtering.
-		if searchLimit < 1000 {
-			searchLimit = 1000
-		}
+		searchLimit = max(
+			// Fetch more to account for OR filtering.
+			limit*10, 1000)
 	}
 
 	var cf *core.Filter

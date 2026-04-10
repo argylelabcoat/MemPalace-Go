@@ -24,15 +24,13 @@ func runWorkerPool[T, R any](items []T, workers int, work func(T) (R, error)) ([
 
 	var wg sync.WaitGroup
 	for w := 0; w < workers && w < len(items); w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := range jobs {
 				r, err := work(j.item)
 				results[j.idx] = r
 				errs[j.idx] = err
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -68,16 +66,13 @@ func runWorkerPoolWithResource[T, R, Res any](
 
 	var wg sync.WaitGroup
 	for _, res := range resources {
-		res := res // capture loop variable
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := range jobs {
 				r, err := work(res, j.item)
 				results[j.idx] = r
 				errs[j.idx] = err
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

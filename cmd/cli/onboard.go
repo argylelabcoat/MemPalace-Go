@@ -64,7 +64,7 @@ func newOnboardCmd() *cobra.Command {
 			// Parse people
 			var people []string
 			if peopleInput != "" {
-				for _, p := range strings.Split(peopleInput, ",") {
+				for p := range strings.SplitSeq(peopleInput, ",") {
 					p = strings.TrimSpace(p)
 					if p != "" {
 						people = append(people, p)
@@ -75,7 +75,7 @@ func newOnboardCmd() *cobra.Command {
 			// Parse projects
 			var projects []string
 			if projectsInput != "" {
-				for _, p := range strings.Split(projectsInput, ",") {
+				for p := range strings.SplitSeq(projectsInput, ",") {
 					p = strings.TrimSpace(p)
 					if p != "" {
 						projects = append(projects, p)
@@ -86,7 +86,7 @@ func newOnboardCmd() *cobra.Command {
 			// Parse wings
 			var wings []string
 			if wingsInput != "" {
-				for _, w := range strings.Split(wingsInput, ",") {
+				for w := range strings.SplitSeq(wingsInput, ",") {
 					w = strings.TrimSpace(w)
 					if w != "" {
 						wings = append(wings, w)

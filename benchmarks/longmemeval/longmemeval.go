@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -114,7 +115,7 @@ func Run(dataFile string, mode string, granularity string, limit int, skip int, 
 	for i := range embs {
 		e, err := embedder.New("", "")
 		if err != nil {
-			for j := 0; j < i; j++ {
+			for j := range i {
 				embs[j].Close()
 			}
 			return nil, fmt.Errorf("create embedder %d: %w", i, err)
@@ -378,13 +379,7 @@ func mapCorpusToSessionIDs(corpusIDs []string, entry Entry) []string {
 		sessionID := strings.TrimSuffix(cid, "_turn_0")
 		if sessionID != cid {
 			// Suffix was stripped — verify the resulting session ID actually exists.
-			found := false
-			for _, s := range entry.HaystackSessionIDs {
-				if s == sessionID {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(entry.HaystackSessionIDs, sessionID)
 			if !found {
 				// Stripped form isn't a known session; fall through to full scan.
 				sessionID = cid

@@ -122,8 +122,8 @@ func NormalizeChatGPTExport(content []byte) (*NormalizedConversation, error) {
 func NormalizeClaudeCodeJSONL(content []byte) (*NormalizedConversation, error) {
 	result := &NormalizedConversation{Source: "claude-code"}
 
-	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(strings.TrimSpace(string(content)), "\n")
+	for line := range lines {
 		if line == "" {
 			continue
 		}

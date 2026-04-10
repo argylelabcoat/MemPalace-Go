@@ -57,7 +57,7 @@ func TestIndex_AddAndSearch(t *testing.T) {
 func TestIndex_SearchLimit(t *testing.T) {
 	idx := New(DefaultK1, DefaultB)
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		idx.Add("doc", "repeated content for testing")
 	}
 

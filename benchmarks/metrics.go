@@ -3,6 +3,7 @@ package benchmarks
 
 import (
 	"math"
+	"slices"
 )
 
 // RecallAny computes binary recall: did at least one correct item appear in top-K?
@@ -26,13 +27,7 @@ func RecallAll(topK []string, correctIDs []string) float64 {
 		correctSet[id] = true
 	}
 	for _, id := range correctIDs {
-		found := false
-		for _, tid := range topK {
-			if tid == id {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(topK, id)
 		if !found {
 			return 0.0
 		}

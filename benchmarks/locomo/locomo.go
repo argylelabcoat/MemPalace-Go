@@ -213,11 +213,11 @@ func mapEvidenceToIDs(evidence []string, granularity string, sessions map[string
 }
 
 func computeF1(results []search.Drawer, answer string) float64 {
-	var text string
+	var text strings.Builder
 	for _, r := range results {
-		text += r.Metadata["content"] + " "
+		text.WriteString(r.Metadata["content"] + " ")
 	}
-	return benchmarks.F1Score(text, answer)
+	return benchmarks.F1Score(text.String(), answer)
 }
 
 func getString(m map[string]any, key string) string {

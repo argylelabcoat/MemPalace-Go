@@ -309,10 +309,10 @@ func TestApplyNinFilter(t *testing.T) {
 
 func TestHasInOrNinFilter(t *testing.T) {
 	tests := []struct {
-		name       string
-		filter     map[string]any
-		wantIn     bool
-		wantNin    bool
+		name    string
+		filter  map[string]any
+		wantIn  bool
+		wantNin bool
 	}{
 		{
 			name:    "$in present",

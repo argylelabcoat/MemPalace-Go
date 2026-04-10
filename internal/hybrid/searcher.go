@@ -4,6 +4,7 @@ package hybrid
 
 import (
 	"context"
+	"slices"
 	"sort"
 
 	"github.com/argylelabcoat/mempalace-go/internal/bm25"
@@ -388,13 +389,7 @@ func matchesFilter(doc bm25.ScoredDoc, filter map[string]any) bool {
 			if !exists {
 				return false
 			}
-			found := false
-			for _, v := range inVals {
-				if docVal == v {
-					found = true
-					break
-				}
-			}
+			found := slices.Contains(inVals, docVal)
 			if !found {
 				return false
 			}
@@ -404,10 +399,8 @@ func matchesFilter(doc bm25.ScoredDoc, filter map[string]any) bool {
 		if ninVals, has := condMap["$nin"].([]any); has {
 			docVal, exists := payload[key]
 			if exists {
-				for _, v := range ninVals {
-					if docVal == v {
-						return false
-					}
+				if slices.Contains(ninVals, docVal) {
+					return false
 				}
 			}
 		}

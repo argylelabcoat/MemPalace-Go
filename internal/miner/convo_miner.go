@@ -76,7 +76,7 @@ func parseClaudeExchanges(content []byte) []Exchange {
 		userMatches := userRegex.FindAllStringSubmatch(text, -1)
 
 		minLen := min(len(userMatches), len(responseMatches))
-		for i := 0; i < minLen; i++ {
+		for i := range minLen {
 			user := ""
 			assistant := ""
 			if i < len(userMatches) {

@@ -59,10 +59,7 @@ func BuildSessionCache(ctx context.Context, embs []*embedder.Embedder, entries [
 
 	// Split the unique texts into per-worker chunks and embed in parallel.
 	// Each worker gets a contiguous slice of texts to embed.
-	workers := len(embs)
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(len(embs), 1)
 
 	// Build per-worker text slices (by index range, not by content).
 	type textRange struct {
@@ -73,10 +70,7 @@ func BuildSessionCache(ctx context.Context, embs []*embedder.Embedder, entries [
 	chunkSize := (len(texts) + workers - 1) / workers
 	for i := range ranges {
 		s := i * chunkSize
-		e := s + chunkSize
-		if e > len(texts) {
-			e = len(texts)
-		}
+		e := min(s+chunkSize, len(texts))
 		ranges[i] = textRange{start: s, end: e}
 	}
 

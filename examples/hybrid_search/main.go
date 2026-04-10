@@ -49,13 +49,6 @@ func main() {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // --- Migration Guide ---
 //
 // BEFORE (pure vector search):

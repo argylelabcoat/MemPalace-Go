@@ -129,7 +129,7 @@ func TestDiaryReadLimit(t *testing.T) {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		e := Entry{Agent: "test", Content: "entry"}
 		if err := d.Write(e); err != nil {
 			t.Fatalf("Write failed: %v", err)

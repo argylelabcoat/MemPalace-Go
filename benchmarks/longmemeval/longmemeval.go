@@ -1,0 +1,310 @@
+// Package longmemeval implements the LongMemEval benchmark for long-term memory retrieval.
+package longmemeval
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/argylelabcoat/mempalace-go/benchmarks"
+	"github.com/argylelabcoat/mempalace-go/internal/dialect"
+	"github.com/argylelabcoat/mempalace-go/internal/embedder"
+	"github.com/argylelabcoat/mempalace-go/internal/search"
+	govector "github.com/argylelabcoat/mempalace-go/storage/govector"
+)
+
+type Entry struct {
+	QuestionID         string   `json:"question_id"`
+	QuestionType       string   `json:"question_type"`
+	Question           string   `json:"question"`
+	Answer             string   `json:"answer"`
+	AnswerSessionIDs   []string `json:"answer_session_ids"`
+	QuestionDate       string   `json:"question_date"`
+	HaystackSessions   [][]any  `json:"haystack_sessions"`
+	HaystackSessionIDs []string `json:"haystack_session_ids"`
+	HaystackDates      []string `json:"haystack_dates"`
+}
+
+type Result struct {
+	Mode        string                `json:"mode"`
+	Granularity string                `json:"granularity"`
+	TotalQ      int                   `json:"total_questions"`
+	Recall5     float64               `json:"recall_5"`
+	Recall10    float64               `json:"recall_10"`
+	NDCG10      float64               `json:"ndcg_10"`
+	PerType     map[string]TypeResult `json:"per_type"`
+	PerK        map[int]KResult       `json:"per_k"`
+}
+
+type TypeResult struct {
+	Count  int     `json:"count"`
+	R5     float64 `json:"r5"`
+	R10    float64 `json:"r10"`
+	NDCG10 float64 `json:"ndcg_10"`
+}
+
+type KResult struct {
+	RecallAny float64 `json:"recall_any"`
+	RecallAll float64 `json:"recall_all"`
+	NDCG      float64 `json:"ndcg"`
+}
+
+var evalKs = []int{1, 3, 5, 10, 30, 50}
+
+func Run(dataFile string, mode string, granularity string, limit int, skip int, topK int) (*Result, error) {
+	ctx := context.Background()
+	data, err := os.ReadFile(dataFile)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []Entry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	if skip > 0 && skip < len(entries) {
+		entries = entries[skip:]
+	}
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
+
+	result := &Result{
+		Mode: mode, Granularity: granularity,
+		PerType: make(map[string]TypeResult),
+		PerK:    make(map[int]KResult),
+	}
+	for _, k := range evalKs {
+		result.PerK[k] = KResult{}
+	}
+
+	encoder := dialect.NewEncoder()
+	totalQ := 0
+	hits5 := 0
+	hits10 := 0
+	totalNDCG10 := 0.0
+	perTypeResults := make(map[string]*TypeResult)
+
+	for _, entry := range entries {
+		emb, err := embedder.New("", "")
+		if err != nil {
+			continue
+		}
+
+		store, corpusIDs, err := buildCorpus(ctx, emb, entry, mode, encoder)
+		emb.Close()
+		if err != nil {
+			continue
+		}
+
+		searcher := search.NewSearcher(store, emb)
+		results, err := searcher.Search(ctx, entry.Question, "", "", topK)
+		if err != nil {
+			continue
+		}
+
+		var retrievedIDs []string
+		for _, r := range results {
+			retrievedIDs = append(retrievedIDs, r.Metadata["corpus_id"])
+		}
+
+		// Fill missing
+		retrievedSet := make(map[string]bool)
+		for _, id := range retrievedIDs {
+			retrievedSet[id] = true
+		}
+		for _, id := range corpusIDs {
+			if !retrievedSet[id] {
+				retrievedIDs = append(retrievedIDs, id)
+			}
+		}
+
+		retrievedSessionIDs := mapCorpusToSessionIDs(retrievedIDs, entry)
+		top5 := retrievedSessionIDs
+		if len(top5) > 5 {
+			top5 = top5[:5]
+		}
+		top10 := retrievedSessionIDs
+		if len(top10) > 10 {
+			top10 = top10[:10]
+		}
+
+		r5 := benchmarks.RecallAny(top5, entry.AnswerSessionIDs)
+		r10 := benchmarks.RecallAny(top10, entry.AnswerSessionIDs)
+		ndcg10 := benchmarks.NDCG(retrievedIDs, entry.AnswerSessionIDs, corpusIDs, 10)
+
+		if r5 > 0 {
+			hits5++
+		}
+		if r10 > 0 {
+			hits10++
+		}
+		totalNDCG10 += ndcg10
+		totalQ++
+
+		for _, k := range evalKs {
+			topKIDs := retrievedSessionIDs
+			if k < len(topKIDs) {
+				topKIDs = topKIDs[:k]
+			}
+			rAny := benchmarks.RecallAny(topKIDs, entry.AnswerSessionIDs)
+			rAll := benchmarks.RecallAll(topKIDs, entry.AnswerSessionIDs)
+			ndcg := benchmarks.NDCG(retrievedIDs, entry.AnswerSessionIDs, corpusIDs, k)
+			kr := result.PerK[k]
+			kr.RecallAny += rAny
+			kr.RecallAll += rAll
+			kr.NDCG += ndcg
+			result.PerK[k] = kr
+		}
+
+		tr, exists := perTypeResults[entry.QuestionType]
+		if !exists {
+			tr = &TypeResult{}
+			perTypeResults[entry.QuestionType] = tr
+		}
+		tr.Count++
+		tr.R5 += r5
+		tr.R10 += r10
+		tr.NDCG10 += ndcg10
+
+		status := "miss"
+		if r5 > 0 {
+			status = "HIT"
+		}
+		fmt.Printf("[%d/%d] R@5=%.0f R@10=%.0f NDCG@10=%.3f %s\n",
+			totalQ, len(entries), r5, r10, ndcg10, status)
+	}
+
+	result.TotalQ = totalQ
+	if totalQ > 0 {
+		result.Recall5 = float64(hits5) / float64(totalQ) * 100
+		result.Recall10 = float64(hits10) / float64(totalQ) * 100
+		result.NDCG10 = totalNDCG10 / float64(totalQ)
+		for typ, tr := range perTypeResults {
+			if tr.Count > 0 {
+				result.PerType[typ] = TypeResult{
+					Count: tr.Count, R5: tr.R5 / float64(tr.Count) * 100,
+					R10: tr.R10 / float64(tr.Count) * 100, NDCG10: tr.NDCG10 / float64(tr.Count),
+				}
+			}
+		}
+		for k := range result.PerK {
+			kr := result.PerK[k]
+			kr.RecallAny /= float64(totalQ)
+			kr.RecallAll /= float64(totalQ)
+			kr.NDCG /= float64(totalQ)
+			result.PerK[k] = kr
+		}
+	}
+	return result, nil
+}
+
+func buildCorpus(ctx context.Context, emb *embedder.Embedder, entry Entry, mode string, encoder *dialect.Encoder) (*govector.Store, []string, error) {
+	store, err := govector.NewStore("", 384)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var corpusIDs []string
+	corpusIdx := 0
+
+	for sessIdx, session := range entry.HaystackSessions {
+		if sessIdx >= len(entry.HaystackSessionIDs) {
+			continue
+		}
+		sessionID := entry.HaystackSessionIDs[sessIdx]
+
+		var userTurns []string
+		for _, turnAny := range session {
+			turn, _ := turnAny.(map[string]any)
+			if turn == nil {
+				continue
+			}
+			if role, ok := turn["role"].(string); ok && role == "user" {
+				if content, ok := turn["content"].(string); ok {
+					userTurns = append(userTurns, content)
+				}
+			}
+		}
+
+		if len(userTurns) == 0 {
+			continue
+		}
+
+		sessionText := strings.Join(userTurns, " ")
+		if mode == "aaak" {
+			sessionText = encoder.Compress(sessionText, map[string]string{})
+		}
+
+		vector, err := emb.CreateEmbedding(ctx, sessionText)
+		if err != nil {
+			continue
+		}
+
+		corpusID := fmt.Sprintf("%s_turn_0", sessionID)
+		corpusIDs = append(corpusIDs, corpusID)
+		payload := map[string]any{
+			"corpus_id": corpusID, "session_id": sessionID,
+			"sess_idx": sessIdx, "content": sessionText,
+		}
+		store.Add(fmt.Sprintf("doc_%d", corpusIdx), vector, payload)
+		corpusIdx++
+	}
+	return store, corpusIDs, nil
+}
+
+func mapCorpusToSessionIDs(corpusIDs []string, entry Entry) []string {
+	var sessionIDs []string
+	seen := make(map[string]bool)
+	for _, cid := range corpusIDs {
+		sessionID := strings.TrimSuffix(cid, "_turn_0")
+		if sessionID == cid {
+			for _, s := range entry.HaystackSessionIDs {
+				if strings.HasPrefix(cid, s) {
+					sessionID = s
+					break
+				}
+			}
+		}
+		if !seen[sessionID] {
+			seen[sessionID] = true
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+	}
+	return sessionIDs
+}
+
+func PrintResults(result *Result) {
+	fmt.Println("\n=== LongMemEval Results ===")
+	fmt.Printf("Mode: %s, Granularity: %s\n", result.Mode, result.Granularity)
+	fmt.Printf("Total Questions: %d\n", result.TotalQ)
+	fmt.Printf("Recall@5:  %.1f%%\n", result.Recall5)
+	fmt.Printf("Recall@10: %.1f%%\n", result.Recall10)
+	fmt.Printf("NDCG@10:   %.3f\n", result.NDCG10)
+
+	fmt.Println("\nPer-K Results:")
+	for _, k := range evalKs {
+		if kr, ok := result.PerK[k]; ok {
+			fmt.Printf("  K=%2d: RecallAny=%.3f, RecallAll=%.3f, NDCG=%.3f\n",
+				k, kr.RecallAny, kr.RecallAll, kr.NDCG)
+		}
+	}
+
+	if len(result.PerType) > 0 {
+		fmt.Println("\nPer-Type Results:")
+		for typ, tr := range result.PerType {
+			fmt.Printf("  %-30s n=%3d R@5=%.1f%% R@10=%.1f%% NDCG@10=%.3f\n",
+				typ, tr.Count, tr.R5, tr.R10, tr.NDCG10)
+		}
+	}
+}
+
+func SaveResults(result *Result, outputPath string) error {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outputPath, data, 0644)
+}

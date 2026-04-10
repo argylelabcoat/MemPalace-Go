@@ -1,0 +1,474 @@
+// Package miner extracts memories from project files and conversations.
+// It walks directories and stores content as drawers in the palace.
+package miner
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/argylelabcoat/mempalace-go/internal/palace"
+	"github.com/argylelabcoat/mempalace-go/internal/search"
+)
+
+// SupportedFileExtensions is the set of file extensions the miner will process.
+var SupportedFileExtensions = map[string]bool{
+	// Programming languages
+	".go": true, ".py": true, ".rs": true, ".js": true, ".ts": true,
+	".jsx": true, ".tsx": true, ".java": true, ".rb": true, ".sh": true,
+	".c": true, ".cpp": true, ".h": true, ".hpp": true,
+	".swift": true, ".kt": true, ".scala": true, ".php": true,
+	// Web
+	".html": true, ".css": true, ".json": true,
+	// Config
+	".yaml": true, ".yml": true, ".toml": true, ".ini": true, ".env": true,
+	// Data
+	".csv": true, ".sql": true, ".xml": true,
+	// Documentation
+	".md": true, ".txt": true, ".rst": true, ".adoc": true,
+}
+
+// SkipDirs is the set of directory names to skip during mining.
+var SkipDirs = map[string]bool{
+	".git": true, ".svn": true, ".hg": true,
+	"node_modules": true, "__pycache__": true, ".venv": true, "venv": true,
+	".next": true, ".nuxt": true, "dist": true, "build": true, "out": true,
+	"coverage": true, ".coverage": true, ".cache": true,
+	".idea": true, ".vscode": true,
+}
+
+// Miner extracts project files into the memory palace.
+type Miner struct {
+	searcher  *search.Searcher
+	ignoreFns []func(path string) bool
+}
+
+// NewMiner creates a new Miner.
+func NewMiner(searcher *search.Searcher) *Miner {
+	return &Miner{
+		searcher:  searcher,
+		ignoreFns: []func(path string) bool{},
+	}
+}
+
+// AddIgnoreFn adds a custom ignore function.
+func (m *Miner) AddIgnoreFn(fn func(path string) bool) {
+	m.ignoreFns = append(m.ignoreFns, fn)
+}
+
+// LoadGitignore loads .gitignore patterns from the given directory and adds an ignore function.
+func (m *Miner) LoadGitignore(dir string) error {
+	gitignorePath := filepath.Join(dir, ".gitignore")
+	patterns, err := loadGitignorePatterns(gitignorePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No gitignore is fine
+		}
+		return err
+	}
+	if len(patterns) > 0 {
+		m.AddIgnoreFn(func(path string) bool {
+			return matchesGitignore(path, dir, patterns)
+		})
+	}
+	return nil
+}
+
+// MineProject walks a directory and mines supported files into the palace.
+func (m *Miner) MineProject(ctx context.Context, dir, wingOverride string) error {
+	if wingOverride == "" {
+		wingOverride = filepath.Base(dir)
+	}
+
+	var mined, skipped, upToDate int
+
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip errors, continue
+		}
+
+		// Skip directories
+		if info.IsDir() {
+			if SkipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Skip symlinks
+		if info.Mode()&os.ModeSymlink != 0 {
+			skipped++
+			return nil
+		}
+
+		// Skip files over 10MB
+		if info.Size() > 10*1024*1024 {
+			skipped++
+			return nil
+		}
+
+		// Check extension
+		ext := strings.ToLower(filepath.Ext(path))
+		if !SupportedFileExtensions[ext] {
+			skipped++
+			return nil
+		}
+
+		// Check ignore functions
+		for _, fn := range m.ignoreFns {
+			if fn(path) {
+				skipped++
+				return nil
+			}
+		}
+
+		// Check mtime-based dedup
+		absPath, _ := filepath.Abs(path)
+		if m.isUpToDate(absPath, info.ModTime()) {
+			upToDate++
+			return nil
+		}
+
+		// Read file
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		// Determine room from path
+		room := detectRoomFromPath(path)
+
+		// Chunk large files (800 chars, 100 overlap)
+		chunks := chunkContent(string(content), 800, 100)
+		for i, chunk := range chunks {
+			drawer := palace.Drawer{
+				ID:         fmt.Sprintf("d_%d_%d", time.Now().UnixNano(), i),
+				Content:    chunk,
+				Wing:       wingOverride,
+				Room:       room,
+				SourceFile: absPath,
+				ChunkIndex: i,
+				AddedBy:    "mempalace-go",
+				FiledAt:    time.Now(),
+				Metadata: map[string]string{
+					"mtime": info.ModTime().Format(time.RFC3339),
+				},
+			}
+
+			if err := m.searcher.Store(ctx, drawer); err != nil {
+				fmt.Printf("Warning: failed to store %s chunk %d: %v\n", path, i, err)
+			} else {
+				mined++
+				updateMtime(absPath, info.ModTime())
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Mined %d chunks, %d up-to-date, %d skipped into wing '%s'\n",
+		mined, upToDate, skipped, wingOverride)
+	return nil
+}
+
+// MtimeIndex tracks the last modification time of mined files.
+var mtimeIndex = make(map[string]string)
+
+// LoadMtimeIndex loads the mtime index from the palace path.
+func LoadMtimeIndex(palacePath string) error {
+	path := filepath.Join(palacePath, "mtime_index.txt")
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		parts := strings.SplitN(scanner.Text(), "\t", 2)
+		if len(parts) == 2 {
+			mtimeIndex[parts[0]] = parts[1]
+		}
+	}
+	return scanner.Err()
+}
+
+// SaveMtimeIndex saves the mtime index to the palace path.
+func SaveMtimeIndex(palacePath string) error {
+	path := filepath.Join(palacePath, "mtime_index.txt")
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for file, mtime := range mtimeIndex {
+		fmt.Fprintf(f, "%s\t%s\n", file, mtime)
+	}
+	return nil
+}
+
+// isUpToDate checks if a file has been modified since last mining.
+func (m *Miner) isUpToDate(absPath string, modTime time.Time) bool {
+	stored, ok := mtimeIndex[absPath]
+	if !ok {
+		return false
+	}
+	storedTime, err := time.Parse(time.RFC3339, stored)
+	if err != nil {
+		return false
+	}
+	return !modTime.After(storedTime)
+}
+
+// updateMtime updates the mtime index for a file.
+func updateMtime(absPath string, modTime time.Time) {
+	mtimeIndex[absPath] = modTime.Format(time.RFC3339)
+}
+
+// chunkContent splits content into overlapping chunks.
+func chunkContent(content string, chunkSize, overlap int) []string {
+	if len(content) <= chunkSize {
+		return []string{content}
+	}
+
+	var chunks []string
+	for i := 0; i < len(content); i += chunkSize - overlap {
+		end := i + chunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+		chunks = append(chunks, content[i:end])
+		if end == len(content) {
+			break
+		}
+	}
+	return chunks
+}
+
+// detectRoomFromPath determines the room from the file path.
+func detectRoomFromPath(path string) string {
+	dir := filepath.Dir(path)
+	parts := strings.Split(dir, string(filepath.Separator))
+
+	for _, part := range parts {
+		lower := strings.ToLower(part)
+		switch {
+		case containsAny(lower, "frontend", "ui", "components", "views", "widgets"):
+			return "frontend"
+		case containsAny(lower, "backend", "api", "server", "handlers", "controllers"):
+			return "backend"
+		case containsAny(lower, "docs", "documentation", "readme", "wiki"):
+			return "documentation"
+		case containsAny(lower, "test", "tests", "spec", "specs", "__tests__"):
+			return "testing"
+		case containsAny(lower, "config", "cfg", "settings", "conf"):
+			return "configuration"
+		case containsAny(lower, "script", "scripts", "bin", "tools"):
+			return "scripts"
+		case containsAny(lower, "design", "assets", "styles", "css"):
+			return "design"
+		case containsAny(lower, "db", "database", "migrations", "schema"):
+			return "database"
+		case containsAny(lower, "infra", "infrastructure", "deploy", "k8s", "docker"):
+			return "infrastructure"
+		}
+	}
+
+	return "general"
+}
+
+func containsAny(s string, items ...string) bool {
+	for _, item := range items {
+		if strings.Contains(s, item) {
+			return true
+		}
+	}
+	return false
+}
+
+// --- .gitignore support ---
+
+type gitignorePattern struct {
+	pattern  string
+	negated  bool
+	dirOnly  bool
+	anchored bool
+	prefix   string
+	suffix   string
+}
+
+func loadGitignorePatterns(path string) ([]gitignorePattern, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var patterns []gitignorePattern
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		pattern := parseGitignoreLine(line)
+		if pattern != nil {
+			patterns = append(patterns, *pattern)
+		}
+	}
+	return patterns, scanner.Err()
+}
+
+func parseGitignoreLine(line string) *gitignorePattern {
+	negated := false
+	if strings.HasPrefix(line, "!") {
+		negated = true
+		line = line[1:]
+	}
+
+	dirOnly := strings.HasSuffix(line, "/")
+	if dirOnly {
+		line = line[:len(line)-1]
+	}
+
+	anchored := strings.Contains(line, "/") && !strings.HasSuffix(line, "/")
+	if anchored && !strings.HasPrefix(line, "/") {
+		line = "/" + line
+	}
+
+	if strings.HasPrefix(line, "/") {
+		anchored = true
+		line = line[1:]
+	}
+
+	return &gitignorePattern{
+		pattern:  line,
+		negated:  negated,
+		dirOnly:  dirOnly,
+		anchored: anchored,
+		prefix:   getPrefix(line),
+		suffix:   getSuffix(line),
+	}
+}
+
+func getPrefix(pattern string) string {
+	if idx := strings.IndexAny(pattern, "*?["); idx >= 0 {
+		return pattern[:idx]
+	}
+	return pattern
+}
+
+func getSuffix(pattern string) string {
+	if idx := strings.LastIndexAny(pattern, "*?["); idx >= 0 {
+		return pattern[idx+1:]
+	}
+	return pattern
+}
+
+func matchesGitignore(path, baseDir string, patterns []gitignorePattern) bool {
+	relPath, err := filepath.Rel(baseDir, path)
+	if err != nil {
+		return false
+	}
+	relPath = filepath.ToSlash(relPath)
+
+	matched := false
+	for _, p := range patterns {
+		if p.negated {
+			if matchPattern(relPath, p) {
+				matched = false
+			}
+		} else {
+			if matchPattern(relPath, p) {
+				matched = true
+			}
+		}
+	}
+	return matched
+}
+
+func matchPattern(path string, p gitignorePattern) bool {
+	if p.anchored {
+		return matchGlob(path, p.pattern)
+	}
+	// Try matching against any path component
+	parts := strings.Split(path, "/")
+	for i := range parts {
+		subPath := strings.Join(parts[i:], "/")
+		if matchGlob(subPath, p.pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchGlob(path, pattern string) bool {
+	pattern = strings.ReplaceAll(pattern, "**/", "**/")
+	pattern = strings.ReplaceAll(pattern, "**", "**")
+
+	patternRegex := "^"
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		switch c {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				patternRegex += ".*"
+				i++
+				if i+1 < len(pattern) && pattern[i+1] == '/' {
+					i++
+				}
+			} else {
+				patternRegex += "[^/]*"
+			}
+		case '?':
+			patternRegex += "[^/]"
+		case '.':
+			patternRegex += "\\."
+		case '[':
+			patternRegex += "["
+		case ']':
+			patternRegex += "]"
+		case '\\':
+			if i+1 < len(pattern) {
+				i++
+				patternRegex += "\\" + string(pattern[i])
+			}
+		default:
+			patternRegex += string(c)
+		}
+	}
+	patternRegex += "$"
+
+	matched, _ := filepath.Match(strings.ReplaceAll(patternRegex, ".*", "*"), path)
+	// Simple fallback: use basic string matching
+	if !matched {
+		matched = strings.Contains(path, strings.ReplaceAll(pattern, "**", ""))
+	}
+	return matched
+}
+
+// GenerateContentHash generates a SHA256 hash of file content for dedup.
+func GenerateContentHash(content string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+}
+
+func generateID() string {
+	return fmt.Sprintf("d_%d", time.Now().UnixNano())
+}

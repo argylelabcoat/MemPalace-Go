@@ -46,3 +46,26 @@ func FindConfigFile(projectDir string) (string, bool) {
 
 	return "", false
 }
+
+func SaveRoomsToYAML(path string, projectName string, rooms []RoomConfig) error {
+	cfg := yamlConfig{
+		ProjectName: projectName,
+		Rooms:       rooms,
+	}
+
+	data, err := yaml.Marshal(&cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal YAML config: %w", err)
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config file %s: %w", path, err)
+	}
+
+	return nil
+}

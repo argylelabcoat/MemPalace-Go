@@ -163,7 +163,7 @@ func (m *Miner) MineProject(ctx context.Context, dir, wingOverride string) error
 		if m.roomDetector != nil {
 			room = m.roomDetector.DetectRoom(absPath, string(content), m.projectDir)
 		} else {
-			room = detectRoomFromPath(path)
+			room = DetectRoomCombined(absPath, string(content))
 		}
 
 		// Chunk large files (800 chars, 100 overlap)

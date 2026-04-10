@@ -9,26 +9,25 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/daulet/tokenizers"
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/options"
 	"github.com/knights-analytics/hugot/pipelines"
 )
 
-// maxRunes is a conservative character (Unicode code-point) limit to keep
-// subword token counts well within GoMLX's 512-position-embedding limit.
-// Word-count limits are unreliable because:
-//   - Long URLs tokenize ~1 token per character
-//   - Unicode math/symbol characters can produce many tokens per code-point
-//
-// Using 400 runes as the limit: in the worst case (URLs, ASCII only) each
-// rune produces one token, giving ≤ 400 tokens — safely under the 512 limit.
-// For normal prose this allows ~60–80 words of meaningful content.
-const maxRunes = 400
+// maxTokens is the model's position embedding limit. all-MiniLM-L6-v2
+// and most sentence-transformer models support up to 512 subword tokens.
+const maxTokens = 512
 
 // Embedder generates text embeddings using hugot (Hugging Face ONNX runtime).
 type Embedder struct {
-	pipeline *pipelines.FeatureExtractionPipeline
-	session  *hugot.Session
+	pipeline    *pipelines.FeatureExtractionPipeline
+	session     *hugot.Session
+	tokenizer   *tokenizers.Tokenizer
+	modelPath   string
+	modelsDir   string
+	modelName   string
+	initialized bool
 }
 
 // New creates a new Embedder. It downloads (if needed) and loads the model.
@@ -44,6 +43,18 @@ func New(modelName string, modelsDir string) (*Embedder, error) {
 	modelPath, err := hugot.DownloadModel(modelName, modelsDir, downloadOpts)
 	if err != nil {
 		return nil, fmt.Errorf("download model: %w", err)
+	}
+
+	e := &Embedder{
+		modelPath: modelPath,
+		modelsDir: modelsDir,
+		modelName: modelName,
+	}
+
+	if err := e.loadTokenizer(); err != nil {
+		// Non-fatal: fall back to rune-based truncation.
+		// This can happen if tokenizer.json is missing or corrupted.
+		fmt.Fprintf(os.Stderr, "warning: tokenizer unavailable, falling back to rune truncation: %v\n", err)
 	}
 
 	// Try ORT + CoreML (Apple Silicon GPU/ANE acceleration).
@@ -72,27 +83,76 @@ func New(modelName string, modelsDir string) (*Embedder, error) {
 		return nil, fmt.Errorf("create pipeline: %w", err)
 	}
 
-	return &Embedder{
-		pipeline: pipeline,
-		session:  session,
-	}, nil
+	e.pipeline = pipeline
+	e.session = session
+	e.initialized = true
+
+	return e, nil
 }
 
-// truncateText limits text to maxRunes Unicode code-points to stay within
-// the model's 512-token position-embedding limit.
-// Word-count limits are unreliable because URLs and Unicode math symbols can
-// produce far more than 4 subword tokens per word; character limits are safe.
-func truncateText(text string) string {
-	runes := []rune(text)
-	if len(runes) <= maxRunes {
+// loadTokenizer loads the HuggingFace tokenizer from the model directory.
+func (e *Embedder) loadTokenizer() error {
+	// Try the model's tokenizer.json first.
+	tokenizerPath := filepath.Join(e.modelPath, "tokenizer.json")
+	if _, err := os.Stat(tokenizerPath); err == nil {
+		tok, err := tokenizers.FromFile(tokenizerPath)
+		if err == nil {
+			e.tokenizer = tok
+			return nil
+		}
+	}
+
+	// Fallback: check the sibling sentence-transformers directory (downloaded separately).
+	altPath := filepath.Join(e.modelsDir, "sentence-transformers_all-MiniLM-L6-v2", "tokenizer.json")
+	if _, err := os.Stat(altPath); err == nil {
+		tok, err := tokenizers.FromFile(altPath)
+		if err == nil {
+			e.tokenizer = tok
+			return nil
+		}
+	}
+
+	return fmt.Errorf("tokenizer.json not found in %s or %s", tokenizerPath, altPath)
+}
+
+// truncateText limits text to fit within the model's token limit.
+// Uses the actual tokenizer when available; falls back to rune-count truncation.
+func (e *Embedder) truncateText(text string) string {
+	if e.tokenizer != nil {
+		return e.truncateByTokens(text)
+	}
+	return truncateByRunes(text)
+}
+
+// truncateByTokens encodes text, truncates to maxTokens, and decodes back to string.
+// This uses the full 512-token window instead of the conservative 400-rune limit.
+func (e *Embedder) truncateByTokens(text string) string {
+	tokenIDs, _ := e.tokenizer.Encode(text, false)
+	if len(tokenIDs) <= maxTokens {
 		return text
 	}
-	return string(runes[:maxRunes])
+	// Decode the first maxTokens tokens back to a string.
+	truncated := e.tokenizer.Decode(tokenIDs[:maxTokens], false)
+	if truncated == "" {
+		return truncateByRunes(text)
+	}
+	return truncated
+}
+
+// truncateByRunes is the fallback: limits text to ~400 Unicode code-points.
+// Word-count limits are unreliable because URLs and Unicode math symbols can
+// produce far more than 4 subword tokens per word; character limits are safe.
+func truncateByRunes(text string) string {
+	runes := []rune(text)
+	if len(runes) <= 400 {
+		return text
+	}
+	return string(runes[:400])
 }
 
 // CreateEmbedding generates a float32 vector for the given text.
 func (e *Embedder) CreateEmbedding(ctx context.Context, text string) ([]float32, error) {
-	output, err := e.pipeline.RunPipeline([]string{truncateText(text)})
+	output, err := e.pipeline.RunPipeline([]string{e.truncateText(text)})
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +165,7 @@ func (e *Embedder) CreateEmbedding(ctx context.Context, text string) ([]float32,
 }
 
 // CreateEmbeddings batch-embeds multiple texts in a single forward pass.
-// It processes texts in chunks of 32 (recommended by hugot) and handles
+// It processes texts in chunks of 64 (recommended by hugot) and handles
 // GoMLX graph shape mismatches by falling back to single embeddings when needed.
 func (e *Embedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
@@ -115,17 +175,14 @@ func (e *Embedder) CreateEmbeddings(ctx context.Context, texts []string) ([][]fl
 	// Truncate all texts first
 	truncated := make([]string, len(texts))
 	for i, t := range texts {
-		truncated[i] = truncateText(t)
+		truncated[i] = e.truncateText(t)
 	}
 
 	const chunkSize = 64
 	allEmbeddings := make([][]float32, 0, len(texts))
 
 	for i := 0; i < len(truncated); i += chunkSize {
-		end := i + chunkSize
-		if end > len(truncated) {
-			end = len(truncated)
-		}
+		end := min(i+chunkSize, len(truncated))
 		chunk := truncated[i:end]
 
 		output, err := e.pipeline.RunPipeline(chunk)
@@ -188,8 +245,11 @@ func findOrtDylibDir() (string, error) {
 	return dir, nil
 }
 
-// Close releases the hugot session resources.
+// Close releases the hugot session and tokenizer resources.
 func (e *Embedder) Close() {
+	if e.tokenizer != nil {
+		e.tokenizer.Close()
+	}
 	if e.session != nil {
 		e.session.Destroy()
 	}

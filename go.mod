@@ -4,16 +4,17 @@ go 1.26.2
 
 require (
 	github.com/DotNetAge/govector v0.1.4
+	github.com/daulet/tokenizers v1.26.0
 	github.com/knights-analytics/hugot v0.7.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
+	go.yaml.in/yaml/v3 v3.0.4
 	modernc.org/sqlite v1.48.2
 )
 
 require (
 	github.com/chewxy/math32 v1.11.1 // indirect
 	github.com/coder/hnsw v0.6.1 // indirect
-	github.com/daulet/tokenizers v1.26.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-errors/errors v1.5.1 // indirect
@@ -46,7 +47,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yalue/onnxruntime_go v1.27.0 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 // indirect
 	golang.org/x/image v0.38.0 // indirect

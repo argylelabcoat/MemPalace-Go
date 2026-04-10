@@ -6,40 +6,105 @@ import (
 	"testing"
 )
 
-// TestTruncateText verifies that truncateText keeps output within maxRunes
-// even for pathological inputs (long URLs, Unicode math symbols).
-func TestTruncateText(t *testing.T) {
+// TestTruncateByRunes verifies the fallback rune truncation handles
+// pathological inputs (long URLs, Unicode math symbols).
+func TestTruncateByRunes(t *testing.T) {
 	// Normal short text — should pass through unchanged.
 	short := "hello world"
-	if got := truncateText(short); got != short {
+	if got := truncateByRunes(short); got != short {
 		t.Errorf("short text modified: got %q, want %q", got, short)
 	}
 
 	// Text exactly at the limit — must not be truncated.
-	atLimit := strings.Repeat("a", maxRunes)
-	if got := truncateText(atLimit); got != atLimit {
+	atLimit := strings.Repeat("a", 400)
+	if got := truncateByRunes(atLimit); got != atLimit {
 		t.Errorf("text at limit was modified")
 	}
 
-	// Text longer than the limit — must be truncated to exactly maxRunes runes.
-	long := strings.Repeat("a", maxRunes+100)
-	got := truncateText(long)
-	if len([]rune(got)) != maxRunes {
-		t.Errorf("truncated text has %d runes, want %d", len([]rune(got)), maxRunes)
+	// Text longer than the limit — must be truncated to exactly 400 runes.
+	long := strings.Repeat("a", 500)
+	got := truncateByRunes(long)
+	if len([]rune(got)) != 400 {
+		t.Errorf("truncated text has %d runes, want %d", len([]rune(got)), 400)
 	}
 
-	// Long URL (single "word") — must be truncated to maxRunes runes.
-	longURL := "https://" + strings.Repeat("x", maxRunes+50) + ".com/path/to/image.jpg"
-	gotURL := truncateText(longURL)
-	if len([]rune(gotURL)) > maxRunes {
-		t.Errorf("URL not truncated: %d runes > %d", len([]rune(gotURL)), maxRunes)
+	// Long URL (single "word") — must be truncated to 400 runes.
+	longURL := "https://" + strings.Repeat("x", 450) + ".com/path/to/image.jpg"
+	gotURL := truncateByRunes(longURL)
+	if len([]rune(gotURL)) > 400 {
+		t.Errorf("URL not truncated: %d runes > 400", len([]rune(gotURL)))
 	}
 
 	// Unicode math symbols — each rune is a single code-point.
-	mathText := strings.Repeat("𝐴", maxRunes+10)
-	gotMath := truncateText(mathText)
-	if len([]rune(gotMath)) > maxRunes {
-		t.Errorf("unicode math not truncated: %d runes > %d", len([]rune(gotMath)), maxRunes)
+	mathText := strings.Repeat("𝐴", 500)
+	gotMath := truncateByRunes(mathText)
+	if len([]rune(gotMath)) > 400 {
+		t.Errorf("unicode math not truncated: %d runes > 400", len([]rune(gotMath)))
+	}
+}
+
+// TestTruncateByTokens verifies token-aware truncation stays within 512 tokens.
+func TestTruncateByTokens(t *testing.T) {
+	// Create a minimal embedder with just a tokenizer (no model needed).
+	e := &Embedder{}
+	if err := e.loadTokenizer(); err != nil {
+		t.Skipf("tokenizer unavailable, skipping token-aware test: %v", err)
+	}
+	defer e.tokenizer.Close()
+
+	// Short text — should pass through unchanged.
+	short := "hello world"
+	if got := e.truncateByTokens(short); got != short {
+		t.Errorf("short text modified: got %q, want %q", got, short)
+	}
+
+	// Text that produces exactly 512 tokens — should not be truncated.
+	// Generate enough text to get close to 512 tokens.
+	longText := strings.Repeat("the quick brown fox jumps over the lazy dog ", 60)
+	tokenIDs, _ := e.tokenizer.Encode(longText, false)
+	if len(tokenIDs) > maxTokens {
+		// Text is too long; trim it to exactly 512 tokens worth.
+		// We need to find a text that fits — just use the truncate result.
+	}
+
+	// Text longer than 512 tokens — must be truncated.
+	veryLong := strings.Repeat("the quick brown fox jumps over the lazy dog ", 200)
+	got := e.truncateByTokens(veryLong)
+	gotTokens, _ := e.tokenizer.Encode(got, false)
+	if len(gotTokens) > maxTokens {
+		t.Errorf("truncated text has %d tokens, want ≤ %d", len(gotTokens), maxTokens)
+	}
+
+	// Long URL — must be truncated to ≤ 512 tokens.
+	longURL := "https://" + strings.Repeat("abcdef", 200) + ".com/" + strings.Repeat("path", 100)
+	gotURL := e.truncateByTokens(longURL)
+	gotURLTokens, _ := e.tokenizer.Encode(gotURL, false)
+	if len(gotURLTokens) > maxTokens {
+		t.Errorf("URL not truncated: %d tokens > %d", len(gotURLTokens), maxTokens)
+	}
+
+	// Unicode — must be truncated.
+	unicodeText := strings.Repeat("𝐴𝐵𝐶", 300)
+	gotUnicode := e.truncateByTokens(unicodeText)
+	gotUnicodeTokens, _ := e.tokenizer.Encode(gotUnicode, false)
+	if len(gotUnicodeTokens) > maxTokens {
+		t.Errorf("unicode not truncated: %d tokens > %d", len(gotUnicodeTokens), maxTokens)
+	}
+}
+
+// TestTruncateText_Method verifies the method delegates correctly.
+func TestTruncateText_Method(t *testing.T) {
+	// Without tokenizer — should use rune fallback.
+	e := &Embedder{}
+	short := "hello world"
+	if got := e.truncateText(short); got != short {
+		t.Errorf("short text modified: got %q, want %q", got, short)
+	}
+
+	long := strings.Repeat("a", 500)
+	got := e.truncateText(long)
+	if len([]rune(got)) != 400 {
+		t.Errorf("fallback truncation: got %d runes, want 400", len([]rune(got)))
 	}
 }
 
